@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 기본 방패 형태 유지 (회색) -->
+    <path
+        android:fillColor="#757575"
+        android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12 5.16,-1.26 9,-6.45 9,-12V5l-9,-4z"/>
+    <!-- 직관적인 빨간색 X 표시 추가 -->
+    <path
+        android:fillColor="#FF5252"
+        android:pathData="M15.59,8.41L12,12L8.41,8.41L7,9.83L10.59,13.41L7,17L8.41,18.41L12,14.83L15.59,18.41L17,17L13.41,13.41L17,9.83L15.59,8.41Z"/>
+</vector>
