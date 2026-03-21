@@ -14,8 +14,8 @@ android {
         applicationId = "com.jinn.watch2out"
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -49,7 +49,11 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.play.services.wearable)
-    implementation(libs.kotlinx.coroutines.play.services) // Add this for .await()
+    implementation(libs.kotlinx.coroutines.play.services) 
+    
+    // Activity & Fragment (Required for ActivityResult APIs in Lint)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.fragment)
     
     // Wear Compose
     implementation(libs.androidx.wear.compose.material)
@@ -60,8 +64,7 @@ dependencies {
     implementation(libs.androidx.watchface.complications.data)
     implementation(libs.androidx.watchface.complications.datasource)
     
-    // Standard Compose & Activity
-    implementation(libs.androidx.activity.compose)
+    // Standard Compose
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)
@@ -79,6 +82,8 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
+    // Compose Testing
+    androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

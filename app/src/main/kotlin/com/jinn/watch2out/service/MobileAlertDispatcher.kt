@@ -28,22 +28,23 @@ class MobileAlertDispatcher(private val context: Context) {
         speed: Float
     ) {
         // Critical: Always log entry at Warning level to confirm dispatcher was reached
-        Log.w(TAG, "🔔 EMERGENCY DISPATCH TRIGGERED! SMS: ${settings.isSmsEnabled}, Email: ${settings.isEmailEnabled}")
+        Log.w(TAG, "🔔 EMERGENCY DISPATCH TRIGGERED! SMS: ${settings.isSmsEnabled}")
 
+        // 1. Legacy SMS Dispatch
         if (settings.isSmsEnabled && settings.smsRecipient.isNotEmpty()) {
-            performDispatchWithRetry("Mobile SMS") {
+            performDispatchWithRetry("Mobile SMS (Legacy)") {
                 sendSms(settings.smsRecipient, type, timestamp, lat, lon)
             }
-        } else {
-            Log.w(TAG, "SMS dispatch skipped: Disabled or no recipient.")
         }
 
-        if (settings.isEmailEnabled && settings.emailRecipient.isNotEmpty()) {
-            performDispatchWithRetry("Mobile Email") {
-                sendEmail(settings.emailRecipient, type, timestamp, lat, lon, maxG, speed)
+        // 2. Multi-Contact Dispatch (v22.0)
+        settings.contacts.forEach { contact ->
+            if (contact.enableSms && contact.phoneNumber.isNotEmpty()) {
+                performDispatchWithRetry("Mobile SMS to ${contact.name}") {
+                    sendSms(contact.phoneNumber, type, timestamp, lat, lon)
+                }
             }
-        } else {
-            Log.w(TAG, "Email dispatch skipped: Disabled or no recipient.")
+            // Note: Voice call dispatch can be added here if needed
         }
     }
 
@@ -81,22 +82,5 @@ class MobileAlertDispatcher(private val context: Context) {
         val smsManager = context.getSystemService(SmsManager::class.java)
         val parts = smsManager.divideMessage(message)
         smsManager.sendMultipartTextMessage(recipient, null, parts, null, null)
-    }
-
-    private suspend fun sendEmail(recipient: String, type: String, timestamp: Long, lat: Double?, lon: Double?, maxG: Float, speed: Float) {
-        val incident = IncidentData(
-            type = type,
-            timestamp = timestamp,
-            latitude = lat,
-            longitude = lon,
-            maxG = maxG,
-            speed = speed
-        )
-        val subject = AlertFormatter.formatEmailSubject(type, timestamp)
-        val body = AlertFormatter.formatEmailBody(incident)
-        
-        Log.w(TAG, "📧 [MOBILE EMAIL] SENDING TO $recipient")
-        Log.w(TAG, "📧 [MOBILE EMAIL] SUBJECT: $subject")
-        Log.w(TAG, "📧 [MOBILE EMAIL] BODY:\n$body")
     }
 }

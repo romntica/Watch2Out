@@ -35,7 +35,7 @@ import kotlinx.coroutines.tasks.await
 
 /**
  * Mobile Alert UI for incidents.
- * Sequence: 15s Countdown (Immediate Dispatch on Timeout) -> Optional 7s Cancellation Window.
+ * v22.0: Synchronized cancellation logic with Wear OS.
  */
 class IncidentAlertActivity : ComponentActivity() {
 
@@ -44,7 +44,10 @@ class IncidentAlertActivity : ComponentActivity() {
 
     private val dismissReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.jinn.watch2out.DISMISS_ALERT") finish()
+            if (intent?.action == "com.jinn.watch2out.DISMISS_ALERT") {
+                Log.d("IncidentAlert", "Remote dismiss received via Broadcast")
+                finish()
+            }
         }
     }
 
@@ -53,7 +56,7 @@ class IncidentAlertActivity : ComponentActivity() {
         
         val filter = IntentFilter("com.jinn.watch2out.DISMISS_ALERT")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(dismissReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(dismissReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(dismissReceiver, filter)
@@ -88,14 +91,12 @@ class IncidentAlertActivity : ComponentActivity() {
                         countdown--
                         isRedColor = !isRedColor
                     }
-                    // 15s Timeout: Dispatch immediately
                     triggerFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
                 } else {
                     while (cancelCountdown > 0) {
                         delay(1000)
                         cancelCountdown--
                     }
-                    // If window expires without confirm, dispatch anyway
                     triggerFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
                 }
             }
@@ -146,13 +147,6 @@ class IncidentAlertActivity : ComponentActivity() {
                             Text("BACK TO ALERT", color = Color.White)
                         }
                     }
-                    
-                    if (uiState == UIState.ALERTING) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        TextButton(onClick = { /* Emergency Call */ }) {
-                            Text("CALL EMERGENCY SERVICES NOW", color = Color.White.copy(alpha = 0.7f))
-                        }
-                    }
                 }
             }
         }
@@ -181,14 +175,16 @@ class IncidentAlertActivity : ComponentActivity() {
                     Wearable.getMessageClient(this@IncidentAlertActivity)
                         .sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_DISMISS, null).await()
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) { 
+                Log.e("IncidentAlert", "Failed to notify Watch: ${e.message}")
+            }
             finish()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(dismissReceiver)
+        try { unregisterReceiver(dismissReceiver) } catch (e: Exception) { }
         activityScope.cancel()
     }
 }

@@ -9,8 +9,10 @@ import android.hardware.Sensor
 import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -26,13 +28,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.material.*
 import com.google.android.gms.wearable.*
-import com.jinn.watch2out.shared.model.DetectionMode
-import com.jinn.watch2out.shared.model.IncidentState
-import com.jinn.watch2out.shared.model.WatchSettings
+import com.jinn.watch2out.shared.model.*
 import com.jinn.watch2out.wear.data.SettingsRepository
 import com.jinn.watch2out.wear.service.SentinelService
-import com.jinn.watch2out.shared.model.TelemetryState
-import com.jinn.watch2out.shared.model.SensorStatus
 import com.jinn.watch2out.shared.network.ProtocolContract
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -40,13 +38,10 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-/**
- * Screen Navigation State
- */
-sealed class Screen {
-    object Main : Screen()
-    object Settings : Screen()
-    object Dashboard : Screen()
+sealed class WearNavScreen {
+    object Main : WearNavScreen()
+    object Settings : WearNavScreen()
+    object Dashboard : WearNavScreen()
 }
 
 class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListener {
@@ -54,16 +49,25 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
     private val sentinelServiceState = mutableStateOf<SentinelService?>(null)
     private var isBound = false
 
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
+        Log.d("MainActivity", "Location Permission Granted: $granted")
+    }
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as SentinelService.SentinelBinder
             sentinelServiceState.value = binder.getService()
             isBound = true
+            Log.d("MainActivity", "SentinelService Bound")
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             sentinelServiceState.value = null
             isBound = false
+            Log.d("MainActivity", "SentinelService Unbound")
         }
     }
 
@@ -71,6 +75,11 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
         super.onCreate(savedInstanceState)
         settingsRepository = SettingsRepository(this)
         
+        requestPermissionLauncher.launch(arrayOf(
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION
+        ))
+
         Intent(this, SentinelService::class.java).also { intent ->
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
@@ -84,7 +93,9 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
     }
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
-        when (messageEvent.path) {
+        val path = messageEvent.path
+        Log.d("MainActivity", "Message received: $path")
+        when (path) {
             ProtocolContract.Paths.REQUEST_SETTINGS -> {
                 lifecycleScope.launch {
                     val currentSettings = settingsRepository.settingsFlow.first()
@@ -100,21 +111,25 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
             ProtocolContract.Paths.RESET_PEAKS -> {
                 startService(Intent(this, SentinelService::class.java).apply { action = SentinelService.ACTION_RESET_PEAKS })
             }
+            ProtocolContract.Paths.DASHBOARD_START -> {
+                startService(Intent(this, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_START })
+            }
+            ProtocolContract.Paths.DASHBOARD_STOP -> {
+                startService(Intent(this, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_STOP })
+            }
             ProtocolContract.Paths.SIMULATE_FRONTAL,
             ProtocolContract.Paths.SIMULATE_REAR,
             ProtocolContract.Paths.SIMULATE_SIDE,
             ProtocolContract.Paths.SIMULATE_ROLLOVER,
             ProtocolContract.Paths.SIMULATE_PLUNGE -> {
-                sentinelServiceState.value?.simulateIncident(messageEvent.path)
+                sentinelServiceState.value?.simulateIncident(path)
             }
             ProtocolContract.Paths.INJECT_CUSTOM_SENSOR -> {
                 val csv = String(messageEvent.data)
                 sentinelServiceState.value?.injectCustomSensorData(csv)
             }
             ProtocolContract.Paths.INCIDENT_ALERT_DISMISS -> {
-                startService(Intent(this, SentinelService::class.java).apply { 
-                    action = SentinelService.ACTION_DISMISS_INCIDENT 
-                })
+                startService(Intent(this, SentinelService::class.java).apply { action = SentinelService.ACTION_DISMISS_INCIDENT })
             }
         }
     }
@@ -125,116 +140,77 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
             val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.SETTINGS_SYNC).apply {
                 dataMap.putString(ProtocolContract.Keys.SETTINGS_JSON, settingsJson)
                 dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
-                dataMap.putBoolean("is_active", sentinelServiceState.value != null)
             }.asPutDataRequest().setUrgent()
-
             Wearable.getDataClient(this).putDataItem(putDataReq).await()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         Wearable.getMessageClient(this).removeListener(this)
-        if (isBound) {
-            unbindService(connection)
-            isBound = false
-        }
+        if (isBound) { unbindService(connection); isBound = false }
     }
 }
 
 @Composable
 fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
     val coroutineScope = rememberCoroutineScope()
-    var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
+    var currentScreen by remember { mutableStateOf<WearNavScreen>(WearNavScreen.Main) }
     val context = LocalContext.current
     
     val settings by repository.settingsFlow.collectAsState(initial = WatchSettings())
-    val telemetryState = service?.telemetry?.collectAsState(initial = TelemetryState())
+    val telemetryState = service?.telemetry?.collectAsState()
     val telemetry = telemetryState?.value ?: TelemetryState()
-    val serviceStateFlow = service?.currentState?.collectAsState(initial = IncidentState.IDLE)
+    val serviceStateFlow = service?.currentState?.collectAsState()
     val serviceState = serviceStateFlow?.value ?: IncidentState.IDLE
-
-    val listState = rememberScalingLazyListState()
 
     MaterialTheme {
         Scaffold(
             timeText = { TimeText() },
-            vignette = { Vignette(vignettePosition = VignettePosition.TopAndBottom) },
-            positionIndicator = { 
-                if (currentScreen is Screen.Main || currentScreen is Screen.Settings) {
-                    PositionIndicator(scalingLazyListState = listState) 
-                }
-            }
+            vignette = { Vignette(vignettePosition = VignettePosition.TopAndBottom) }
         ) {
             when (currentScreen) {
-                is Screen.Main -> {
+                is WearNavScreen.Main -> {
                     MainScreen(
                         settings = settings,
                         isMonitoring = serviceState == IncidentState.MONITORING,
-                        currentMode = telemetry.currentMode,
+                        inferenceState = telemetry.vehicleInferenceState.name,
                         onStartMonitoring = {
-                            val intent = Intent(context, SentinelService::class.java).apply {
-                                action = SentinelService.ACTION_START_MONITORING
-                            }
+                            val intent = Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_START_MONITORING }
                             context.startForegroundService(intent)
                         },
                         onStopMonitoring = {
-                            val intent = Intent(context, SentinelService::class.java).apply {
-                                action = SentinelService.ACTION_STOP_MONITORING
-                            }
+                            val intent = Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_STOP_MONITORING }
                             context.startService(intent)
                         },
-                        onNavigateToSettings = { currentScreen = Screen.Settings },
-                        onNavigateToDashboard = { currentScreen = Screen.Dashboard }
+                        onNavigateToSettings = { currentScreen = WearNavScreen.Settings },
+                        onNavigateToDashboard = { currentScreen = WearNavScreen.Dashboard }
                     )
                 }
-                is Screen.Settings -> {
+                is WearNavScreen.Settings -> {
                     SettingsScreen(
                         currentSettings = settings,
                         onApply = { newSettings ->
-                            coroutineScope.launch {
-                                repository.updateSettings(newSettings)
-                            }
-                            currentScreen = Screen.Main
+                            coroutineScope.launch { repository.updateSettings(newSettings) }
+                            currentScreen = WearNavScreen.Main
                         },
-                        onCancel = { currentScreen = Screen.Main },
-                        onInjectCustomData = { csv ->
-                            service?.injectCustomSensorData(csv)
-                        }
+                        onCancel = { currentScreen = WearNavScreen.Main },
+                        onInjectCustomData = { csv -> service?.injectCustomSensorData(csv) }
                     )
                 }
-                is Screen.Dashboard -> {
+                is WearNavScreen.Dashboard -> {
+                    DisposableEffect(Unit) {
+                        Log.d("WatchApp", "Entering Dashboard")
+                        context.startService(Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_START })
+                        onDispose {
+                            Log.d("WatchApp", "Exiting Dashboard")
+                            context.startService(Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_STOP })
+                        }
+                    }
+
                     DashboardScreen(
-                        currentImpact = telemetry.currentImpact,
-                        maxImpact = telemetry.maxImpact,
-                        peakFallScore = telemetry.peakFallScore,
-                        peakCrashScore = telemetry.peakCrashScore,
-                        windowImpact = telemetry.windowImpact,
-                        windowFallScore = telemetry.windowFallScore,
-                        windowCrashScore = telemetry.windowCrashScore,
-                        currentMode = telemetry.currentMode,
-                        accelX = telemetry.accelX,
-                        accelY = telemetry.accelY,
-                        accelZ = telemetry.accelZ,
-                        gyroX = telemetry.gyroX,
-                        gyroY = telemetry.gyroY,
-                        gyroZ = telemetry.gyroZ,
-                        rotationX = telemetry.rotationX,
-                        rotationY = telemetry.rotationY,
-                        rotationZ = telemetry.rotationZ,
-                        airPressure = telemetry.airPressure,
-                        rotationSpeed = telemetry.rotationSpeed,
-                        pressureDelta = telemetry.pressureDelta,
-                        tiltAngle = telemetry.tiltAngle,
-                        onResetPeak = {
-                            val intent = Intent(context, SentinelService::class.java).apply {
-                                action = SentinelService.ACTION_RESET_PEAKS
-                            }
-                            context.startService(intent)
-                        },
-                        onClose = { currentScreen = Screen.Main }
+                        telemetry = telemetry,
+                        onClose = { currentScreen = WearNavScreen.Main }
                     )
                 }
             }
@@ -246,7 +222,7 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
 fun MainScreen(
     settings: WatchSettings,
     isMonitoring: Boolean,
-    currentMode: DetectionMode,
+    inferenceState: String,
     onStartMonitoring: () -> Unit,
     onStopMonitoring: () -> Unit,
     onNavigateToSettings: () -> Unit,
@@ -272,7 +248,7 @@ fun MainScreen(
             Button(onClick = { if (isMonitoring) onStopMonitoring() else onStartMonitoring() }, modifier = Modifier.fillMaxWidth(0.85f).height(75.dp), colors = if (isMonitoring) ButtonDefaults.secondaryButtonColors() else ButtonDefaults.primaryButtonColors()) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(text = if (isMonitoring) "STOP" else "START", style = MaterialTheme.typography.title1)
-                    if (isMonitoring) { Text(text = "VEHICLE MODE", style = MaterialTheme.typography.caption3, color = Color.Yellow) }
+                    if (isMonitoring) { Text(text = inferenceState, style = MaterialTheme.typography.caption3, color = Color.Yellow) }
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))

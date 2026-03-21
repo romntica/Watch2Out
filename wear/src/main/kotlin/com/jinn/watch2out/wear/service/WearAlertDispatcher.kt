@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 
 /**
  * Handles emergency notifications directly from the Wear device with retry logic.
+ * Updated for v22.0: Removed Email support and added multi-contact SMS fallback.
  */
 class WearAlertDispatcher(private val context: Context) {
 
@@ -35,28 +36,20 @@ class WearAlertDispatcher(private val context: Context) {
             return
         }
 
-        // SMS Dispatch
+        // 1. Legacy SMS Dispatch
         if (settings.isSmsEnabled && settings.smsRecipient.isNotEmpty()) {
-            performDispatchWithRetry("Watch SMS") {
+            performDispatchWithRetry("Watch SMS (Legacy)") {
                 sendSms(settings.smsRecipient, type, timestamp, lat, lon)
             }
         }
 
-        // Email Logging (Watch usually doesn't send mail directly, but we log the attempt)
-        if (settings.isEmailEnabled && settings.emailRecipient.isNotEmpty()) {
-            val incident = IncidentData(
-                type = type,
-                timestamp = timestamp,
-                latitude = lat,
-                longitude = lon,
-                maxG = maxG,
-                speed = speed
-            )
-            val subject = AlertFormatter.formatEmailSubject(type, timestamp)
-            val body = AlertFormatter.formatEmailBody(incident)
-            Log.w(TAG, "📧 [WATCH EMAIL] Prepared for: ${settings.emailRecipient}")
-            Log.w(TAG, "📧 [WATCH EMAIL] Subject: $subject")
-            Log.w(TAG, "📧 [WATCH EMAIL] Body: $body")
+        // 2. Multi-Contact SMS Dispatch (v22.0)
+        settings.contacts.forEach { contact ->
+            if (contact.enableSms && contact.phoneNumber.isNotEmpty()) {
+                performDispatchWithRetry("Watch SMS to ${contact.name}") {
+                    sendSms(contact.phoneNumber, type, timestamp, lat, lon)
+                }
+            }
         }
     }
 
@@ -82,7 +75,7 @@ class WearAlertDispatcher(private val context: Context) {
 
     private suspend fun sendSms(recipient: String, type: String, timestamp: Long, lat: Double?, lon: Double?) {
         val message = AlertFormatter.formatSms(type, timestamp, lat, lon)
-        Log.w(TAG, "🚨 [WATCH SMS] SENDING: $message")
+        Log.w(TAG, "🚨 [WATCH SMS] SENDING TO $recipient: $message")
         val smsManager = context.getSystemService(SmsManager::class.java)
         val parts = smsManager.divideMessage(message)
         smsManager.sendMultipartTextMessage(recipient, null, parts, null, null)

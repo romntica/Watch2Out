@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
@@ -48,7 +47,6 @@ class MainActivity : ComponentActivity(),
 
     private val isWatchActiveState = mutableStateOf(false)
     private val isConnectedState = mutableStateOf(false)
-    private val currentModeState = mutableStateOf(DetectionMode.VEHICLE)
     
     private val sensorStates = mutableStateMapOf<String, SensorStatus>(
         "A" to SensorStatus.UNKNOWN,
@@ -82,7 +80,15 @@ class MainActivity : ComponentActivity(),
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     when (currentScreen) {
-                        is Screen.Main -> MainAppContent(isWatchActiveState.value, isConnectedState.value, currentModeState.value, sensorStates, { cmd -> sendRemoteCommand(cmd) }, { requestWatchSettings(); currentScreen = Screen.Settings }, { currentScreen = Screen.Dashboard })
+                        is Screen.Main -> MainAppContent(
+                            isWatchActive = isWatchActiveState.value,
+                            isConnected = isConnectedState.value,
+                            inferenceState = telemetryState.value.vehicleInferenceState,
+                            sensorStates = sensorStates,
+                            onCommand = { cmd -> sendRemoteCommand(cmd) },
+                            onNavigateToSettings = { requestWatchSettings(); currentScreen = Screen.Settings },
+                            onNavigateToDashboard = { currentScreen = Screen.Dashboard }
+                        )
                         is Screen.Settings -> key(watchSettingsState.value) {
                             SettingsScreen(
                                 currentSettings = watchSettingsState.value,
@@ -94,8 +100,17 @@ class MainActivity : ComponentActivity(),
                             )
                         }
                         is Screen.Dashboard -> {
-                            val t = telemetryState.value
-                            DashboardScreen(t.currentImpact, t.maxImpact, 0, t.peakCrashScore, t.windowImpact, 0, t.windowCrashScore, t.currentMode, t.accelX, t.accelY, t.accelZ, t.gyroX, t.gyroY, t.gyroZ, t.rotationX, t.rotationY, t.rotationZ, t.airPressure, t.rotationSpeed, t.pressureDelta, t.tiltAngle, t.pTimestamp, t.pAccelX, t.pAccelY, t.pAccelZ, t.pGyroX, t.pGyroY, t.pGyroZ, t.pRotationX, t.pRotationY, t.pRotationZ, t.pAirPressure, t.pTiltAngle, t.pRotationSpeed, t.wTimestamp, t.wAccelX, t.wAccelY, t.wAccelZ, t.wGyroX, t.wGyroY, t.wGyroZ, t.wRotationX, t.wRotationY, t.wRotationZ, t.wAirPressure, t.wTiltAngle, t.wRotationSpeed, { sendRemoteCommand(ProtocolContract.Paths.RESET_PEAKS) }, { currentScreen = Screen.Main })
+                            // Ephemeral Dashboard Start/Stop handled by lifecycle
+                            DisposableEffect(Unit) {
+                                sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_START)
+                                onDispose { sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_STOP) }
+                            }
+                            
+                            DashboardScreen(
+                                telemetry = telemetryState.value,
+                                onResetPeak = { sendRemoteCommand(ProtocolContract.Paths.RESET_PEAKS) },
+                                onClose = { currentScreen = Screen.Main }
+                            )
                         }
                     }
                 }
@@ -118,7 +133,6 @@ class MainActivity : ComponentActivity(),
             val maxG = intent.getFloatExtra("maxG", 0f)
             val speed = intent.getFloatExtra("speed", 0f)
             
-            Log.w("MainActivity", "🚨 ACTION_TRIGGER_DISPATCH received for $reason")
             triggerFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
         }
     }
@@ -128,8 +142,6 @@ class MainActivity : ComponentActivity(),
             try {
                 val json = String(messageEvent.data)
                 val incident = explicitJson.decodeFromString<IncidentData>(json)
-                Log.d("MainActivity", "Incident JSON received: ${incident.type}")
-
                 val intent = Intent(this, IncidentAlertActivity::class.java).apply {
                     putExtra("reason", incident.type)
                     putExtra("timestamp", incident.timestamp)
@@ -141,7 +153,7 @@ class MainActivity : ComponentActivity(),
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 startActivity(intent)
-            } catch (e: Exception) { Log.e("MainActivity", "Parse Error: ${e.message}") }
+            } catch (e: Exception) { }
         } else if (messageEvent.path == ProtocolContract.Paths.INCIDENT_ALERT_DISMISS) {
             sendBroadcast(Intent("com.jinn.watch2out.DISMISS_ALERT"))
         }
@@ -186,17 +198,28 @@ class MainActivity : ComponentActivity(),
 
     override fun onDataChanged(dataEvents: DataEventBuffer) {
         dataEvents.forEach { event ->
-            if (event.type == DataEvent.TYPE_CHANGED && event.dataItem.uri.path == ProtocolContract.Paths.SETTINGS_SYNC) {
+            if (event.type == DataEvent.TYPE_CHANGED) {
+                val path = event.dataItem.uri.path
                 val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
-                isWatchActiveState.value = dataMap.getBoolean("is_active")
-                val modeStr = dataMap.getString("mode", DetectionMode.VEHICLE.name)
-                currentModeState.value = try { DetectionMode.valueOf(modeStr) } catch(e: Exception) { DetectionMode.VEHICLE }
-                sensorStates["A"] = parseStatus(dataMap.getString("accel_status"))
-                sensorStates["G"] = parseStatus(dataMap.getString("gyro_status"))
-                sensorStates["P"] = parseStatus(dataMap.getString("press_status"))
-                sensorStates["R"] = parseStatus(dataMap.getString("rot_status"))
-                dataMap.getString("telemetry_json")?.let { json -> try { telemetryState.value = explicitJson.decodeFromString<TelemetryState>(json) } catch(e: Exception) { } }
-                dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON)?.let { json -> try { watchSettingsState.value = explicitJson.decodeFromString<WatchSettings>(json) } catch(e: Exception) { } }
+                
+                when (path) {
+                    ProtocolContract.Paths.STATUS_SYNC -> {
+                        isWatchActiveState.value = dataMap.getBoolean(ProtocolContract.Keys.IS_ACTIVE)
+                        sensorStates["A"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ACCEL_STATUS))
+                        sensorStates["G"] = parseStatus(dataMap.getString(ProtocolContract.Keys.GYRO_STATUS))
+                        sensorStates["P"] = parseStatus(dataMap.getString(ProtocolContract.Keys.PRESS_STATUS))
+                        sensorStates["R"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ROT_STATUS))
+                        
+                        dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json -> 
+                            try { telemetryState.value = explicitJson.decodeFromString<TelemetryState>(json) } catch(e: Exception) { } 
+                        }
+                    }
+                    ProtocolContract.Paths.SETTINGS_SYNC -> {
+                        dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON)?.let { json -> 
+                            try { watchSettingsState.value = explicitJson.decodeFromString<WatchSettings>(json) } catch(e: Exception) { } 
+                        }
+                    }
+                }
             }
         }
     }
@@ -236,7 +259,7 @@ class MainActivity : ComponentActivity(),
 }
 
 @Composable
-fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, currentMode: DetectionMode, sensorStates: SnapshotStateMap<String, SensorStatus>, onCommand: (String) -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDashboard: () -> Unit) {
+fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, inferenceState: VehicleInferenceState, sensorStates: SnapshotStateMap<String, SensorStatus>, onCommand: (String) -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDashboard: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("WATCH² OUT", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
@@ -253,7 +276,7 @@ fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, currentMode: De
             Button(onClick = { onCommand(if (isWatchActive) ProtocolContract.Paths.STOP_MONITORING else ProtocolContract.Paths.START_MONITORING) }, enabled = isConnected, modifier = Modifier.size(220.dp), shape = CircleShape, colors = ButtonDefaults.buttonColors(containerColor = if (!isConnected) Color.DarkGray else if (isWatchActive) Color(0xFFD32F2F) else Color(0xFF388E3C)), elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(text = if (isWatchActive) "STOP" else "START", fontSize = 38.sp, fontWeight = FontWeight.Black)
-                    if (isConnected) Text(text = if (isWatchActive) currentMode.name else "READY TO ARM", style = MaterialTheme.typography.labelLarge, color = Color.Yellow.copy(alpha = 0.9f))
+                    if (isConnected) Text(text = if (isWatchActive) inferenceState.name else "READY TO ARM", style = MaterialTheme.typography.labelLarge, color = Color.Yellow.copy(alpha = 0.9f))
                 }
             }
         }

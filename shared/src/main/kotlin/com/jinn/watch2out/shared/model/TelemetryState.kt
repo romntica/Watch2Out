@@ -5,7 +5,8 @@ import kotlinx.serialization.Serializable
 
 /**
  * Snapshot of processed sensor metrics and system state.
- * Refined terminology and added GPS data for precision.
+ * Updated to v22.0 requirements: includes speed drop, directional acceleration peaks,
+ * and advanced metrics like GyroRatio and RollSum.
  */
 @Serializable
 data class TelemetryState(
@@ -22,51 +23,66 @@ data class TelemetryState(
     val vehicleInferenceState: VehicleInferenceState = VehicleInferenceState.IDLE,
     val detectedVehicleIncident: VehicleIncidentType = VehicleIncidentType.NONE,
 
+    // Sync Metadata
+    val lastUpdateTime: Long = 0L,
+    val sessionStartTime: Long = 0L,
+
     // Live Data
-    val accelX: Float = Float.NaN,
-    val accelY: Float = Float.NaN,
-    val accelZ: Float = Float.NaN,
-    val gyroX: Float = Float.NaN,
-    val gyroY: Float = Float.NaN,
-    val gyroZ: Float = Float.NaN,
-    val rotationX: Float = Float.NaN,
-    val rotationY: Float = Float.NaN,
-    val rotationZ: Float = Float.NaN,
-    val airPressure: Float = Float.NaN,
+    val accelX: Float = 0f,
+    val accelY: Float = 0f,
+    val accelZ: Float = 0f,
+    val gyroX: Float = 0f,
+    val gyroY: Float = 0f,
+    val gyroZ: Float = 0f,
+    val rotationX: Float = 0f,
+    val rotationY: Float = 0f,
+    val rotationZ: Float = 0f,
+    val airPressure: Float = 0f,
     val rotationSpeed: Float = 0f,
     val pressureDelta: Float = 0f,
     val tiltAngle: Float = 0f,
-    val gpsSpeed: Float = 0f, // Added GPS speed in m/s
+    val gpsSpeed: Float = 0f,
+    val crashScore: Float = 0f,
+    val gyroRatio: Float = 0f,
+    val rollSum: Float = 0f,
 
-    // Snapshot at Overall Peak Magnitude (P)
+    // Overall Peak Data (All-time or since reset)
     val pTimestamp: Long = 0L,
-    val pAccelX: Float = Float.NaN,
-    val pAccelY: Float = Float.NaN,
-    val pAccelZ: Float = Float.NaN,
-    val pGyroX: Float = Float.NaN,
-    val pGyroY: Float = Float.NaN,
-    val pGyroZ: Float = Float.NaN,
-    val pRotationX: Float = Float.NaN,
-    val pRotationY: Float = Float.NaN,
-    val pRotationZ: Float = Float.NaN,
-    val pAirPressure: Float = Float.NaN,
+    val pAccelX: Float = 0f,
+    val pAccelY: Float = 0f,
+    val pAccelZ: Float = 0f,
+    val pGyroX: Float = 0f,
+    val pGyroY: Float = 0f,
+    val pGyroZ: Float = 0f,
+    val pAirPressure: Float = 0f,
     val pTiltAngle: Float = 0f,
     val pRotationSpeed: Float = 0f,
     val pGpsSpeed: Float = 0f,
+    val pCrashScore: Float = 0f,
+    val pGyroRatio: Float = 0f,
+    val pRollSum: Float = 0f,
+    val pPressureDelta: Float = 0f,
+    val maxLongitudinalG: Float = 0f,
+    val maxLateralG: Float = 0f,
+    val maxSpeedDrop: Float = 0f,
 
-    // Snapshot at Window Peak Magnitude (W)
+    // Window Peak Data
     val wTimestamp: Long = 0L,
-    val wAccelX: Float = Float.NaN,
-    val wAccelY: Float = Float.NaN,
-    val wAccelZ: Float = Float.NaN,
-    val wGyroX: Float = Float.NaN,
-    val wGyroY: Float = Float.NaN,
-    val wGyroZ: Float = Float.NaN,
-    val wRotationX: Float = Float.NaN,
-    val wRotationY: Float = Float.NaN,
-    val wRotationZ: Float = Float.NaN,
-    val wAirPressure: Float = Float.NaN,
+    val wAccelX: Float = 0f,
+    val wAccelY: Float = 0f,
+    val wAccelZ: Float = 0f,
+    val wGyroX: Float = 0f,
+    val wGyroY: Float = 0f,
+    val wGyroZ: Float = 0f,
+    val wAirPressure: Float = 0f,
     val wTiltAngle: Float = 0f,
     val wRotationSpeed: Float = 0f,
-    val wGpsSpeed: Float = 0f
+    val wGpsSpeed: Float = 0f,
+    val wCrashScore: Float = 0f,
+    val wGyroRatio: Float = 0f,
+    val wRollSum: Float = 0f,
+    val wPressureDelta: Float = 0f,
+    val wMaxLongitudinalG: Float = 0f,
+    val wMaxLateralG: Float = 0f,
+    val wMaxSpeedDrop: Float = 0f
 )

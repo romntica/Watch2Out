@@ -12,33 +12,50 @@ enum class SimulationDetectionMode {
 }
 
 /**
+ * Emergency contact entry with specific dispatch preferences.
+ */
+@Serializable
+data class EmergencyContact(
+    val name: String = "",
+    val phoneNumber: String = "",
+    val enableSms: Boolean = true,
+    val enableCall: Boolean = false
+)
+
+/**
  * Configuration for the Sentinel service and emergency dispatch.
- * Includes SMS, Email and Call settings.
+ * Updated to v22.0: Removed Email support as per requirement.
  */
 @Serializable
 data class WatchSettings(
     val isAccelEnabled: Boolean = true,
     val accelThresholdG: Float = 15.0f,
+    val longThresholdG: Float = 4.0f,
+    val latThresholdG: Float = 3.0f,
+    
     val isGyroEnabled: Boolean = true,
     val gyroThresholdDeg: Float = 300.0f,
+    
     val isPressureEnabled: Boolean = true,
     val pressureThresholdHpa: Float = 1.5f,
+    
+    val speedThresholdKmh: Float = 15.0f,
+    val stillnessDurationMs: Long = 3000L,
+    
     val bufferSeconds: Int = 10,
     val samplingRateMs: Int = 100,
     val isSimulationMode: Boolean = false,
     val forcedDetectionMode: SimulationDetectionMode = SimulationDetectionMode.AUTO,
     
-    // Auto-Start Policy
     val isAutoStartEnabled: Boolean = true,
-    
-    // Notification Dispatch Settings
     val useWatchDirectDispatch: Boolean = false,
     
-    // Notification Channels & Recipients
+    // Emergency Contacts List
+    val contacts: List<EmergencyContact> = emptyList(),
+    
+    // Legacy support (Email removed)
     val isSmsEnabled: Boolean = true,
     val smsRecipient: String = "",
-    val isEmailEnabled: Boolean = false,
-    val emailRecipient: String = "",
     val isCallEnabled: Boolean = false,
     val callRecipient: String = ""
 )

@@ -56,8 +56,6 @@ fun SettingsScreen(
     // 4. Other States
     var isSmsEnabled by remember { mutableStateOf<Boolean>(currentSettings.isSmsEnabled) }
     var smsRecipient by remember { mutableStateOf(currentSettings.smsRecipient) }
-    var isEmailEnabled by remember { mutableStateOf<Boolean>(currentSettings.isEmailEnabled) }
-    var emailRecipient by remember { mutableStateOf(currentSettings.emailRecipient) }
     var isCallEnabled by remember { mutableStateOf<Boolean>(currentSettings.isCallEnabled) }
     var callRecipient by remember { mutableStateOf(currentSettings.callRecipient) }
     var useWatchDirectDispatch by remember { mutableStateOf<Boolean>(currentSettings.useWatchDirectDispatch) }
@@ -164,7 +162,6 @@ fun SettingsScreen(
 
             // --- 4. Emergency Contacts ---
             SettingsSection(title = "Emergency Contacts", enabled = isConnected) {
-                ContactField("E-mail Address", isEmailEnabled, emailRecipient, { isEmailEnabled = it }, { emailRecipient = it }, KeyboardType.Email, isConnected)
                 ContactField("SMS Phone", isSmsEnabled, smsRecipient, { isSmsEnabled = it }, { smsRecipient = it }, KeyboardType.Phone, isConnected)
                 ContactField("Emergency Call", isCallEnabled, callRecipient, { isCallEnabled = it }, { callRecipient = it }, KeyboardType.Phone, isConnected)
             }
@@ -183,7 +180,6 @@ fun SettingsScreen(
                             isAutoStartEnabled = isAutoStartEnabled,
                             useWatchDirectDispatch = useWatchDirectDispatch,
                             isSmsEnabled = isSmsEnabled, smsRecipient = smsRecipient,
-                            isEmailEnabled = isEmailEnabled, emailRecipient = emailRecipient,
                             isCallEnabled = isCallEnabled, callRecipient = callRecipient
                         ))
                     },

@@ -25,6 +25,10 @@ object ProtocolContract {
         const val RESET_PEAKS = "$BASE/control/reset_peaks"
         const val UPDATE_SETTINGS = "$BASE/control/update_settings"
         
+        // Dashboard Control (v22.0)
+        const val DASHBOARD_START = "$BASE/dashboard/start"
+        const val DASHBOARD_STOP = "$BASE/dashboard/stop"
+        
         // Simulation Commands
         const val SIMULATE_FRONTAL = "$BASE/sim/frontal"
         const val SIMULATE_REAR = "$BASE/sim/rear"
@@ -35,6 +39,7 @@ object ProtocolContract {
         
         // Data Synchronization
         const val SETTINGS_SYNC = "$BASE/sync/settings"
+        const val STATUS_SYNC = "$BASE/sync/status" // Added for real-time state sync (v22.0)
         const val REQUEST_SETTINGS = "$BASE/sync/request_settings"
         
         // Incident Reporting & Sync
@@ -51,6 +56,12 @@ object ProtocolContract {
         const val PROTOCOL_VERSION = "protocol_version"
         const val TIMESTAMP = "timestamp"
         const val SETTINGS_JSON = "settings_json"
+        const val TELEMETRY_JSON = "telemetry_json"
+        const val IS_ACTIVE = "is_active"
+        const val ACCEL_STATUS = "accel_status"
+        const val GYRO_STATUS = "gyro_status"
+        const val PRESS_STATUS = "press_status"
+        const val ROT_STATUS = "rot_status"
         const val INCIDENT_JSON = "incident_json"
         const val CUSTOM_SENSOR_DATA = "custom_sensor_data"
         const val INCIDENT_REASON = "incident_reason"

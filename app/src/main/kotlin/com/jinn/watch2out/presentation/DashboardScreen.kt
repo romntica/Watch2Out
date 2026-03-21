@@ -12,12 +12,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -26,43 +29,21 @@ import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
-import com.jinn.watch2out.shared.model.DetectionMode
+import com.jinn.watch2out.shared.model.TelemetryState
 import java.text.SimpleDateFormat
 import java.util.*
 
-/**
- * Advanced Mobile Dashboard.
- * Terminology unified: Impact, Gyroscope, Rotation, Air Pressure.
- * 'Posture' interpreted as 'Tilt & Speed' for user clarity.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
-    currentImpact: Float, maxImpact: Float, peakFallScore: Int, peakCrashScore: Int,
-    windowImpact: Float, windowFallScore: Int, windowCrashScore: Int,
-    currentMode: DetectionMode,
-    accelX: Float, accelY: Float, accelZ: Float,
-    gyroX: Float, gyroY: Float, gyroZ: Float,
-    rotationX: Float, rotationY: Float, rotationZ: Float,
-    airPressure: Float, rotationSpeed: Float, pressureDelta: Float, tiltAngle: Float,
-    
-    // Overall Peak Snapshots (P)
-    pTimestamp: Long,
-    pAccelX: Float, pAccelY: Float, pAccelZ: Float,
-    pGyroX: Float, pGyroY: Float, pGyroZ: Float,
-    pRotationX: Float, pRotationY: Float, pRotationZ: Float,
-    pAirPressure: Float, pTiltAngle: Float, pRotationSpeed: Float,
-    
-    // Window Peak Snapshots (W)
-    wTimestamp: Long,
-    wAccelX: Float, wAccelY: Float, wAccelZ: Float,
-    wGyroX: Float, wGyroY: Float, wGyroZ: Float,
-    wRotationX: Float, wRotationY: Float, wRotationZ: Float,
-    wAirPressure: Float, wTiltAngle: Float, wRotationSpeed: Float,
-
+    telemetry: TelemetryState,
     onResetPeak: () -> Unit,
     onClose: () -> Unit
 ) {
+    val timeSdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    val dateSdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+    var selectedWindow by remember { mutableStateOf("10m") }
+    
     Surface(color = Color(0xFF050505), modifier = Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = Color.Transparent,
@@ -72,11 +53,6 @@ fun DashboardScreen(
                     navigationIcon = {
                         IconButton(onClick = onClose) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = onResetPeak) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Reset Peaks", tint = Color.White)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black, titleContentColor = Color.White)
@@ -91,40 +67,81 @@ fun DashboardScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
-                // --- 1. LIVE FEED SECTION ---
-                Text("1. LIVE FEED", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
-                LiveMetricCard(
-                    currentMode, 
-                    !currentImpact.isNaN(), 
-                    accelX, accelY, accelZ, 
-                    gyroX, gyroY, gyroZ, 
-                    rotationX, rotationY, rotationZ, 
-                    airPressure, tiltAngle, rotationSpeed
-                )
-                SensorChartCard(currentImpact)
+                // --- 1. LIVE FEED ---
+                val lastUpdateStr = if (telemetry.lastUpdateTime > 0) {
+                    val diff = (System.currentTimeMillis() - telemetry.lastUpdateTime) / 1000
+                    if (diff < 1) "Just now" else "${diff}s ago"
+                } else "Never"
+                
+                SectionHeader("📊 LIVE FEED (Last Update: $lastUpdateStr)")
+                LiveFeedCard(telemetry)
+                SensorChartCard(telemetry.currentImpact)
 
-                // --- 2. CRASH ANALYTICS SECTION ---
-                AnalyticsGroupSection(
-                    title = "2. CRASH ANALYTICS",
-                    score = peakCrashScore,
-                    accentColor = Color(0xFFFF5252),
-                    pTimestamp = pTimestamp,
-                    pSnap = listOf(pAccelX, pAccelY, pAccelZ, pGyroX, pGyroY, pGyroZ, pRotationX, pRotationY, pRotationZ, pAirPressure, pTiltAngle, pRotationSpeed),
-                    wTimestamp = wTimestamp,
-                    wSnap = listOf(wAccelX, wAccelY, wAccelZ, wGyroX, wGyroY, wGyroZ, wRotationX, wRotationY, wRotationZ, wAirPressure, wTiltAngle, wRotationSpeed),
-                    live = listOf(accelX, accelY, accelZ, gyroX, gyroY, gyroZ, rotationX, rotationY, rotationZ, airPressure, tiltAngle, rotationSpeed)
+                // --- 2. OVERALL PEAK ---
+                val sessionStart = if (telemetry.sessionStartTime > 0) dateSdf.format(Date(telemetry.sessionStartTime)) else "N/A"
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SectionHeader("📊 OVERALL PEAK (Since: $sessionStart)")
+                    IconButton(onClick = onResetPeak, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Reset", tint = Color.Cyan)
+                    }
+                }
+                PeakDataCard(
+                    longG = telemetry.maxLongitudinalG,
+                    latG = telemetry.maxLateralG,
+                    rmsG = telemetry.maxImpact,
+                    crashScore = telemetry.pCrashScore,
+                    gyroRatio = telemetry.pGyroRatio,
+                    speedDelta = telemetry.maxSpeedDrop,
+                    pressDelta = telemetry.pPressureDelta,
+                    rollSum = telemetry.pRollSum,
+                    timestamp = telemetry.pTimestamp
                 )
 
-                // --- 3. FALL ANALYTICS SECTION ---
-                AnalyticsGroupSection(
-                    title = "3. FALL ANALYTICS",
-                    score = peakFallScore,
-                    accentColor = Color(0xFFFFD740),
-                    pTimestamp = pTimestamp,
-                    pSnap = listOf(pAccelX, pAccelY, pAccelZ, pGyroX, pGyroY, pGyroZ, pRotationX, pRotationY, pRotationZ, pAirPressure, pTiltAngle, pRotationSpeed),
-                    wTimestamp = wTimestamp,
-                    wSnap = listOf(wAccelX, wAccelY, wAccelZ, wGyroX, wGyroY, wGyroZ, wRotationX, wRotationY, wRotationZ, wAirPressure, wTiltAngle, wRotationSpeed),
-                    live = listOf(accelX, accelY, accelZ, gyroX, gyroY, gyroZ, rotationX, rotationY, rotationZ, airPressure, tiltAngle, rotationSpeed)
+                // --- 3. WINDOWED PEAK ---
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val windowMs = getWindowMs(selectedWindow)
+                    val windowStartTime = telemetry.lastUpdateTime - windowMs
+                    val rangeStr = "${timeSdf.format(Date(windowStartTime))}~${timeSdf.format(Date(telemetry.lastUpdateTime))}"
+                    SectionHeader("📊 $selectedWindow PEAK ($rangeStr)")
+                    
+                    val tabs = listOf("1m", "5m", "10m", "30m", "1h")
+                    ScrollableTabRow(
+                        selectedTabIndex = tabs.indexOf(selectedWindow),
+                        containerColor = Color.Transparent,
+                        edgePadding = 0.dp,
+                        divider = {},
+                        indicator = { tabPositions ->
+                            if (tabs.indexOf(selectedWindow) != -1) {
+                                TabRowDefaults.SecondaryIndicator(
+                                    modifier = Modifier.tabIndicatorOffset(tabPositions[tabs.indexOf(selectedWindow)]),
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    ) {
+                        tabs.forEach { window ->
+                            Tab(
+                                selected = selectedWindow == window,
+                                onClick = { selectedWindow = window },
+                                text = { Text(window, fontSize = 12.sp, color = if (selectedWindow == window) Color.White else Color.Gray) }
+                            )
+                        }
+                    }
+                }
+                PeakDataCard(
+                    longG = telemetry.wMaxLongitudinalG,
+                    latG = telemetry.wMaxLateralG,
+                    rmsG = telemetry.windowImpact,
+                    crashScore = telemetry.wCrashScore,
+                    gyroRatio = telemetry.wGyroRatio,
+                    speedDelta = telemetry.wMaxSpeedDrop,
+                    pressDelta = telemetry.wPressureDelta,
+                    rollSum = telemetry.wRollSum,
+                    timestamp = telemetry.wTimestamp
                 )
                 
                 Spacer(modifier = Modifier.height(40.dp))
@@ -134,81 +151,149 @@ fun DashboardScreen(
 }
 
 @Composable
-fun LiveMetricCard(mode: DetectionMode, isConnected: Boolean, ax: Float, ay: Float, az: Float, gx: Float, gy: Float, gz: Float, rx: Float, ry: Float, rz: Float, press: Float, tilt: Float, speed: Float) {
-    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFF121212))) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(8.dp).background(if (isConnected) Color.Green else Color.Red, CircleShape))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(mode.name, color = Color.Cyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            }
-            HorizontalDivider(color = Color.DarkGray)
-            MetricLine("Impact (X/Y/Z)", formatXYZ(ax, ay, az, "%.1f"))
-            MetricLine("Gyroscope (X/Y/Z)", formatXYZ(gx, gy, gz, "%d"))
-            MetricLine("Rotation (X/Y/Z)", formatXYZ(rx, ry, rz, "%.2f"))
-            MetricLine("Air Pressure", if (press.isNaN()) "--" else String.format(Locale.getDefault(), "%.1f hPa", press))
-            MetricLine("Posture (Tilt/Speed)", String.format(Locale.getDefault(), "%d° Tilt / %d°/s Speed", tilt.toInt(), speed.toInt()))
-        }
-    }
+fun SectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Black,
+        color = Color.White,
+        letterSpacing = 0.5.sp
+    )
 }
 
 @Composable
-fun AnalyticsGroupSection(score: Int, title: String, accentColor: Color, pTimestamp: Long, pSnap: List<Float>, wTimestamp: Long, wSnap: List<Float>, live: List<Float>) {
-    val sdf = SimpleDateFormat("yy/MM/dd-HH:mm:ss", Locale.getDefault())
+fun LiveFeedCard(t: TelemetryState) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF121212)),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color.DarkGray)
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color.DarkGray),
+        shape = RoundedCornerShape(4.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = accentColor)
-                Text("$score%", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = accentColor)
-            }
-            
-            ComparisonSnapshotBox("Overall Peak Record", pTimestamp, accentColor, pSnap, live, sdf)
-            ComparisonSnapshotBox("Window Peak Record (5s)", wTimestamp, Color.White, wSnap, live, sdf)
-        }
-    }
-}
-
-@Composable
-fun ComparisonSnapshotBox(title: String, timestamp: Long, color: Color, snap: List<Float>, live: List<Float>, sdf: SimpleDateFormat) {
-    val timeStr = if (timestamp > 0) sdf.format(Date(timestamp)) else "No Data"
-    Surface(
-        modifier = Modifier.fillMaxWidth().border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(4.dp)),
-        color = Color.Black, shape = RoundedCornerShape(4.dp)
-    ) {
-        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(title, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = color)
-                Text(timeStr, fontSize = 9.sp, color = Color.Gray)
+                Text(
+                    text = "STATE: ${t.vehicleInferenceState.name}",
+                    color = Color.Yellow,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = String.format(Locale.getDefault(), "%.0f km/h", t.gpsSpeed),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp
+                )
             }
-            HorizontalDivider(color = Color.DarkGray.copy(alpha = 0.5f))
+            HorizontalDivider(color = Color.DarkGray)
             
-            // Compares Snapshot vs Live for each sensor
-            ComparisonItem("Impact", formatXYZ(snap[0], snap[1], snap[2], "%.1f"), formatXYZ(live[0], live[1], live[2], "%.1f"))
-            ComparisonItem("Gyroscope", formatXYZ(snap[3], snap[4], snap[5], "%d"), formatXYZ(live[3], live[4], live[5], "%d"))
-            ComparisonItem("Rotation", formatXYZ(snap[6], snap[7], snap[8], "%.2f"), formatXYZ(live[6], live[7], live[8], "%.2f"))
-            ComparisonItem("Press", formatSingle(snap[9], "%.1f"), formatSingle(live[9], "%.1f"))
-            ComparisonItem("Posture (Tilt/Speed)", "${snap[10].toInt()}°/${snap[11].toInt()}°/s", "${live[10].toInt()}°/${live[11].toInt()}°/s")
+            Row(modifier = Modifier.fillMaxWidth()) {
+                MetricItem("Long Accel", String.format(Locale.getDefault(), "%+.1fg", t.accelY / 9.81f), Modifier.weight(1f))
+                MetricItem("Lat accel", String.format(Locale.getDefault(), "%+.1fg", t.accelX / 9.81f), Modifier.weight(1f))
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                MetricItem("Vert Accel", String.format(Locale.getDefault(), "%+.1fg", t.accelZ / 9.81f), Modifier.weight(1f))
+                MetricItem("accel RMS", String.format(Locale.getDefault(), "%.1fg", t.currentImpact), Modifier.weight(1f))
+            }
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Text("CrashScore: ", fontSize = 12.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
+                    Text(
+                        text = String.format(Locale.getDefault(), "%.2f", t.crashScore),
+                        fontSize = 12.sp,
+                        color = getScoreColor(t.crashScore),
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Box(modifier = Modifier.size(10.dp).background(getScoreColor(t.crashScore), CircleShape))
+                }
+                MetricItem("GyroRatio", String.format(Locale.getDefault(), "%.1f", t.gyroRatio), Modifier.weight(1f))
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                MetricItem("PressureΔ", String.format(Locale.getDefault(), "%+.1fhPa", t.pressureDelta), Modifier.weight(1f))
+                MetricItem("RollSum", String.format(Locale.getDefault(), "%.0f°", t.rollSum), Modifier.weight(1f))
+            }
         }
     }
 }
 
 @Composable
-fun ComparisonItem(label: String, peak: String, live: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, fontSize = 10.sp, color = Color.Gray)
-        Text("$peak (live $live)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+fun PeakDataCard(
+    longG: Float,
+    latG: Float,
+    rmsG: Float,
+    crashScore: Float,
+    gyroRatio: Float,
+    speedDelta: Float,
+    pressDelta: Float,
+    rollSum: Float,
+    timestamp: Long
+) {
+    val timeSdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    val timeStr = if (timestamp > 0) " (${timeSdf.format(Date(timestamp))})" else ""
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF121212)),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color.DarkGray),
+        shape = RoundedCornerShape(4.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            PeakLine("Max Long Accel", String.format(Locale.getDefault(), "%+.1fg", longG), timeStr)
+            PeakLine("Max Lat Accel", String.format(Locale.getDefault(), "%+.1fg", latG), timeStr)
+            PeakLine("Max Accel RMS", String.format(Locale.getDefault(), "%.1fg", rmsG), timeStr)
+            
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Max CrashScore: ", fontSize = 12.sp, color = Color.Gray, fontFamily = FontFamily.Monospace, modifier = Modifier.width(135.dp))
+                Text(String.format(Locale.getDefault(), "%.2f", crashScore), fontSize = 12.sp, color = getScoreColor(crashScore), fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.width(4.dp))
+                Box(modifier = Modifier.size(8.dp).background(getScoreColor(crashScore), CircleShape))
+                Text(timeStr, fontSize = 10.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
+            }
+
+            PeakLine("Max GyroRatio", String.format(Locale.getDefault(), "%.1fx", gyroRatio), timeStr)
+            PeakLine("Max Speed Δv", String.format(Locale.getDefault(), "%.0f km/h", speedDelta), timeStr)
+            PeakLine("Max PressureΔ", String.format(Locale.getDefault(), "%+.1fhPa", pressDelta), timeStr)
+            PeakLine("Max RollSum", String.format(Locale.getDefault(), "%.0f°", rollSum), timeStr)
+        }
     }
 }
 
 @Composable
-fun MetricLine(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, fontSize = 11.sp, color = Color.Gray)
-        Text(value, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+fun MetricItem(label: String, value: String, modifier: Modifier = Modifier) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text("$label: ", fontSize = 12.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
+        Text(value, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+    }
+}
+
+@Composable
+fun PeakLine(label: String, value: String, time: String) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("$label: ", fontSize = 12.sp, color = Color.Gray, fontFamily = FontFamily.Monospace, modifier = Modifier.width(135.dp))
+        Text(value, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        Text(time, fontSize = 10.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
+    }
+}
+
+private fun getScoreColor(score: Float): Color {
+    return when {
+        score < 0.3f -> Color.Green
+        score < 0.7f -> Color.Yellow
+        else -> Color.Red
+    }
+}
+
+private fun getWindowMs(window: String): Long {
+    return when(window) {
+        "1m" -> 60_000L
+        "5m" -> 300_000L
+        "10m" -> 600_000L
+        "30m" -> 1_800_000L
+        "1h" -> 3_600_000L
+        else -> 600_000L
     }
 }
 
@@ -223,45 +308,26 @@ fun SensorChartCard(currentImpact: Float) {
             if (entries.size > 40) entries.removeAt(0)
         }
     }
-    Card(modifier = Modifier.fillMaxWidth().height(140.dp), colors = CardDefaults.cardColors(containerColor = Color.Black)) {
+    Card(modifier = Modifier.fillMaxWidth().height(100.dp), colors = CardDefaults.cardColors(containerColor = Color.Black), shape = RoundedCornerShape(4.dp)) {
         AndroidView(
-            modifier = Modifier.fillMaxSize().padding(8.dp),
+            modifier = Modifier.fillMaxSize().padding(4.dp),
             factory = { context ->
                 LineChart(context).apply {
                     description.isEnabled = false; setTouchEnabled(false); legend.isEnabled = false
-                    xAxis.apply { position = XAxis.XAxisPosition.BOTTOM; setDrawGridLines(false); setDrawLabels(false) }
+                    xAxis.apply { position = XAxis.XAxisPosition.BOTTOM; setDrawGridLines(false); setDrawLabels(false); axisLineColor = android.graphics.Color.DKGRAY }
                     axisLeft.apply { 
-                        setDrawGridLines(true); gridColor = android.graphics.Color.DKGRAY; axisMinimum = 0f; axisMaximum = 10f; textColor = android.graphics.Color.GRAY 
+                        setDrawGridLines(true); gridColor = android.graphics.Color.rgb(30, 30, 30); axisMinimum = 0f; axisMaximum = 10f; textColor = android.graphics.Color.GRAY; textSize = 8f
                     }
                     axisRight.isEnabled = false
                 }
             },
             update = { chart ->
                 val dataSet = LineDataSet(entries.toList(), "Impact").apply {
-                    color = Color.White.toArgb()
-                    setDrawCircles(false); setDrawValues(false); lineWidth = 2f; mode = LineDataSet.Mode.CUBIC_BEZIER
+                    color = Color.Cyan.toArgb()
+                    setDrawCircles(false); setDrawValues(false); lineWidth = 1.5f; mode = LineDataSet.Mode.CUBIC_BEZIER
                 }
                 chart.data = LineData(dataSet); chart.invalidate()
             }
         )
     }
-}
-
-private fun formatSingle(v: Float, pattern: String): String {
-    if (v.isNaN()) return "--"
-    return try {
-        if (pattern.contains("d")) String.format(Locale.getDefault(), pattern, v.toInt())
-        else String.format(Locale.getDefault(), pattern, v)
-    } catch (e: Exception) { "--" }
-}
-
-private fun formatXYZ(x: Float, y: Float, z: Float, pattern: String): String {
-    if (x.isNaN()) return "--"
-    return try {
-        if (pattern == "%d") {
-            String.format(Locale.getDefault(), "%d/%d/%d", x.toInt(), y.toInt(), z.toInt())
-        } else {
-            String.format(Locale.getDefault(), "%.1f/%.1f/%.1f", x, y, z)
-        }
-    } catch (e: Exception) { "--" }
 }
