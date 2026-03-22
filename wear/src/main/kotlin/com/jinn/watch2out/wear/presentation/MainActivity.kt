@@ -52,8 +52,9 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val granted = permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
-        Log.d("MainActivity", "Location Permission Granted: $granted")
+        val locationGranted = permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true
+        Log.d("MainActivity", "Permissions - Location: $locationGranted, Audio: $audioGranted")
     }
 
     private val connection = object : ServiceConnection {
@@ -77,7 +78,8 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
         
         requestPermissionLauncher.launch(arrayOf(
             android.Manifest.permission.ACCESS_FINE_LOCATION,
-            android.Manifest.permission.ACCESS_COARSE_LOCATION
+            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+            android.Manifest.permission.RECORD_AUDIO
         ))
 
         Intent(this, SentinelService::class.java).also { intent ->

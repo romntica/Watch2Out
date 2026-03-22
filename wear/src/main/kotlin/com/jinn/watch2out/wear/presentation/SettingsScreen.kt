@@ -34,7 +34,7 @@ fun SettingsScreen(
     var gyroThreshold by remember { mutableFloatStateOf(currentSettings.gyroThresholdDeg) }
     var isPressureEnabled by remember { mutableStateOf(currentSettings.isPressureEnabled) }
     var pressureThreshold by remember { mutableFloatStateOf(currentSettings.pressureThresholdHpa) }
-    
+
     // 2. Buffer, Interval & Simulation
     var bufferTime by remember { mutableIntStateOf(currentSettings.bufferSeconds) }
     var samplingRateMs by remember { mutableIntStateOf(currentSettings.samplingRateMs) }
@@ -146,7 +146,7 @@ fun SettingsScreen(
                             isAccelEnabled = isAccelEnabled, accelThresholdG = accelThreshold,
                             isGyroEnabled = isGyroEnabled, gyroThresholdDeg = gyroThreshold,
                             isPressureEnabled = isPressureEnabled, pressureThresholdHpa = pressureThreshold,
-                            bufferSeconds = bufferTime, samplingRateMs = samplingRateMs, 
+                            bufferSeconds = bufferTime, samplingRateMs = samplingRateMs,
                             isSimulationMode = simulationMode, forcedDetectionMode = forcedMode,
                             isAutoStartEnabled = isAutoStartEnabled, useWatchDirectDispatch = useWatchDirectDispatch,
                             isSmsEnabled = isSmsEnabled, smsRecipient = smsRecipient,

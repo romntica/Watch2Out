@@ -18,15 +18,12 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
-import android.os.Binder
-import android.os.Build
-import android.os.IBinder
-import android.os.PowerManager
+import android.media.MediaRecorder
+import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.google.android.gms.wearable.PutDataMapRequest
-import com.google.android.gms.wearable.Wearable
+import com.google.android.gms.wearable.*
 import com.jinn.watch2out.shared.model.*
 import com.jinn.watch2out.shared.network.ProtocolContract
 import com.jinn.watch2out.wear.data.DataLogger
@@ -37,13 +34,16 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
  * Safety-critical service for real-time accident detection.
- * Updated for v22.0: Dynamic monitoring rates and refined FSM with session end logic.
+ * v23.6: Immediate 2x10s Audio, Absolute EDR timestamps, and Persistent storage in /Download.
  */
 class SentinelService : Service(), SensorEventListener, LocationListener {
 
@@ -77,9 +77,13 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
     private var isDashboardActive = false
     private val TAG = "SentinelFSM"
 
+    private var mediaRecorder: MediaRecorder? = null
+    private val recordedAudioFiles = mutableListOf<File>()
+    private var audioRecordingJob: Job? = null
+
     private val explicitJson = Json { allowSpecialFloatingPointValues = true; ignoreUnknownKeys = true; encodeDefaults = true }
 
-    // Dynamic Rate Control (Hysteresis)
+    // Dynamic Rate Control
     private var dynamicRateMs: Int = 400
     private var lastRateChangeTime: Long = 0L
     private val RATE_CHANGE_COOLDOWN_MS = 2000L
@@ -107,7 +111,7 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         settingsRepository = SettingsRepository(this)
         alertDispatcher = WearAlertDispatcher(this)
-        
+
         createNotificationChannels()
         startForeground(NOTIFICATION_ID, createForegroundNotification())
         
@@ -138,9 +142,8 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
                     prevGpsSpeed = currentGpsSpeed
                 }
                 
-                // RollSum Reset Condition: 10 minutes of stillness (speed < 2km/h)
                 if (currentGpsSpeed < 0.55f && vInferenceState != VehicleInferenceState.IMPACT_DETECTED && vInferenceState != VehicleInferenceState.STILLNESS) {
-                    if (now - lastSignificantMotionTime > 600000L) { // 10 minutes
+                    if (now - lastSignificantMotionTime > 600000L) {
                         totalRotation = 0f
                         lastSignificantMotionTime = now
                     }
@@ -149,7 +152,7 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
                 }
 
                 if (_currentState.value == IncidentState.MONITORING || isDashboardActive) {
-                    serviceScope.launch { dataLogger.addRecord(snapshot) }
+                    serviceScope.launch { dataLogger.addRecord(now, snapshot) }
                 }
                 
                 val currentImpact = magnitude(floatArrayOf(snapshot[0], snapshot[1], snapshot[2])) / 9.81f
@@ -214,11 +217,9 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
                 )
                 _telemetry.value = newState
                 
-                if (isDashboardActive && (now - lastStreamTime >= 100L)) {
+                if (isDashboardActive || (now - lastStreamTime >= 100L)) {
                     broadcastStatusToMobile(newState)
                     lastStreamTime = now
-                } else if (!isDashboardActive && (now % 2000 < dynamicRateMs)) {
-                    broadcastStatusToMobile(newState)
                 }
             }
         }
@@ -227,7 +228,11 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
     private fun updateMonitoringRate(now: Long) {
         val speedKmh = currentGpsSpeed * 3.6f
         var targetRate: Int = dynamicRateMs
-        if (vInferenceState == VehicleInferenceState.IMPACT_DETECTED || vInferenceState == VehicleInferenceState.STILLNESS) {
+        
+        // v23.6: Fast monitoring during PRE_IMPACT or higher states
+        if (vInferenceState == VehicleInferenceState.PRE_IMPACT ||
+            vInferenceState == VehicleInferenceState.IMPACT_DETECTED || 
+            vInferenceState == VehicleInferenceState.STILLNESS) {
             targetRate = 100
         } else {
             targetRate = when {
@@ -248,19 +253,22 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
 
     private fun updateOverallSnapshot(impact: Float, score: Float, gyro: Float, press: Float, roll: Float, data: FloatArray) = overallPeak.copy(
         maxImpact = impact, pTimestamp = System.currentTimeMillis(), pCrashScore = score,
-        pGyroRatio = gyro, pPressureDelta = press, pRollSum = roll,
-        maxLongitudinalG = data[1] / 9.81f, maxLateralG = data[0] / 9.81f
+        pGyroRatio = gyro, pRollSum = roll, maxLongitudinalG = data[1] / 9.81f, maxLateralG = data[0] / 9.81f
     )
 
     private fun updateWindowSnapshot(impact: Float, score: Float, gyro: Float, press: Float, roll: Float, data: FloatArray) = windowPeak.copy(
         windowImpact = impact, wTimestamp = System.currentTimeMillis(), wCrashScore = score,
-        wGyroRatio = gyro, wPressureDelta = press, wRollSum = roll,
-        wMaxLongitudinalG = data[1] / 9.81f, wMaxLateralG = data[0] / 9.81f
+        wGyroRatio = gyro, wRollSum = roll, wMaxLongitudinalG = data[1] / 9.81f, wMaxLateralG = data[0] / 9.81f
     )
 
     private fun setVInferenceState(newState: VehicleInferenceState) {
         if (vInferenceState != newState) {
-            if (newState == VehicleInferenceState.IMPACT_DETECTED) captureIncidentSnapshot("Vehicle Crash: $detectedType")
+            // CRITICAL: TRIGGER EVIDENCE CAPTURE ON STATE TRANSITION TO IMPACT
+            if (newState == VehicleInferenceState.IMPACT_DETECTED) {
+                Log.w(TAG, "🚨 IMPACT DETECTED! Triggering evidence capture immediately.")
+                captureIncidentSnapshot("Vehicle Crash: $detectedType")
+                startEvidenceRecording()
+            }
             vInferenceState = newState
             stateEntryTime = System.currentTimeMillis()
             broadcastStatusToMobile(_telemetry.value)
@@ -274,21 +282,25 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
 
         when (vInferenceState) {
             VehicleInferenceState.IDLE -> {
-                if (speedKmh > 15f || isSimulatingLocked) {
+                if (g > 4.5f) {
+                    detectedType = VehicleIncidentType.NONE
+                    classifyImpact(accel, gyro, speed)
+                    setVInferenceState(VehicleInferenceState.IMPACT_DETECTED)
+                } else if (speedKmh > 15f || isSimulatingLocked) {
                     setVInferenceState(VehicleInferenceState.DRIVING)
                     lastMoveTime = now
                 }
             }
             VehicleInferenceState.DRIVING -> {
                 if (speedKmh > 2f) lastMoveTime = now
-                
-                // Session End (Long-term stillness)
                 if (now - lastMoveTime > 300000L && !isSimulatingLocked) {
                     setVInferenceState(VehicleInferenceState.IDLE)
                     return
                 }
 
-                if (g > 4.0f) { 
+                // Logic for PRE_IMPACT could be added here if braking or erratic motion is detected
+
+                if (g > 4.0f) {
                     classifyImpact(accel, gyro, speed)
                     setVInferenceState(VehicleInferenceState.IMPACT_DETECTED) 
                 }
@@ -302,139 +314,178 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
         }
     }
 
+    private fun startEvidenceRecording() {
+        audioRecordingJob?.cancel()
+        recordedAudioFiles.clear()
+        audioRecordingJob = serviceScope.launch(Dispatchers.IO) {
+            recordSegment(1)
+            recordSegment(2)
+        }
+    }
+
+    private suspend fun recordSegment(index: Int) {
+        try {
+            val file = File(cacheDir, "temp_evidence_$index.aac")
+            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this@SentinelService) else MediaRecorder()
+            mediaRecorder = recorder.apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioSamplingRate(44100)
+                setAudioChannels(1)
+                setAudioEncodingBitRate(64000)
+                setOutputFile(file.absolutePath)
+                prepare()
+                start()
+            }
+            Log.d(TAG, "🎙 Recording segment $index started (10s)")
+            delay(10000)
+            try { recorder.stop() } catch (e: Exception) {}
+            recorder.release()
+            recordedAudioFiles.add(file)
+        } catch (e: Exception) { Log.e(TAG, "Audio Error $index: ${e.message}") }
+        mediaRecorder = null
+    }
+
+    private fun stopAudioRecording() {
+        try { mediaRecorder?.stop(); mediaRecorder?.release() } catch (e: Exception) {}
+        mediaRecorder = null
+    }
+
     private fun captureIncidentSnapshot(reason: String) {
         serviceScope.launch {
             val loc = fetchBestLocation()
-            val sensorHistory = dataLogger.getOrderedSnapshot().map { TelemetryPoint(0L, it[0], it[1], it[2], magnitude(floatArrayOf(it[0], it[1], it[2])) / 9.81f) }
-            pendingIncidentSnapshot = IncidentData(type = reason, timestamp = System.currentTimeMillis(), latitude = loc?.latitude, longitude = loc?.longitude, maxG = overallPeak.maxImpact, speed = currentGpsSpeed * 3.6f, sensorData = sensorHistory)
+            val now = System.currentTimeMillis()
+            val localTimeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(now))
+            
+            val sensorHistory = dataLogger.getOrderedSnapshot().map { (timestamp, data) ->
+                TelemetryPoint(
+                    t = timestamp,
+                    offset = timestamp - now,
+                    ax = data[0]/9.81f, ay = data[1]/9.81f, az = data[2]/9.81f,
+                    gx = data[3], gy = data[4], gz = data[5], spd = data[11]*3.6f,
+                    mag = magnitude(floatArrayOf(data[0], data[1], data[2]))/9.81f
+                )
+            }
+            pendingIncidentSnapshot = IncidentData(
+                type = reason, timestamp = now, utcTime = localTimeStr, 
+                latitude = loc?.latitude, longitude = loc?.longitude, 
+                maxG = overallPeak.maxImpact, speed = currentGpsSpeed * 3.6f, 
+                sensorData = sensorHistory, isSimulation = isSimulatingLocked
+            )
         }
-    }
-
-    fun injectCustomSensorData(csv: String) {
-        serviceScope.launch {
-            isSimulatingLocked = true
-            try {
-                val p = csv.split(",").map { it.trim().toFloat() }
-                if (p.size >= 6) {
-                    val accel = floatArrayOf(p[0], p[1], p[2])
-                    synchronized(currentReading) { 
-                        currentReading[0] = p[0]; currentReading[1] = p[1]; currentReading[2] = p[2]
-                        currentReading[6] = p[5]; currentGpsSpeed = p[4] / 3.6f; currentReading[11] = currentGpsSpeed
-                    }
-                    updateVehicleInference(accel, floatArrayOf(p[3], 0f, 0f), p[4] / 3.6f, p[5])
-                    delay(1000)
-                    for (i in 1..3) { updateVehicleInference(floatArrayOf(0f, 0f, 9.81f), floatArrayOf(0f, 0f, 0f), 0f, p[5]); delay(1000) }
-                }
-            } finally { isSimulatingLocked = false }
-        }
-    }
-
-    fun simulateIncident(path: String) {
-        isSimulatingLocked = true; captureIncidentSnapshot("Simulated Incident")
-        serviceScope.launch { delay(500); onIncidentDetected(); isSimulatingLocked = false }
-    }
-
-    private fun onIncidentDetected() {
-        if (_currentState.value == IncidentState.TRIGGERED && !isSimulatingLocked) return
-        val data = pendingIncidentSnapshot ?: return
-        _currentState.value = IncidentState.TRIGGERED
-        val wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "WWOut:IncidentWake")
-        wakeLock.acquire(30000)
-        serviceScope.launch {
-            try {
-                val json = explicitJson.encodeToString(data)
-                val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
-                for (node in nodes) Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_START, json.toByteArray())
-            } catch (e: Exception) { }
-        }
-        val intent = Intent(this, IncidentAlertActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra("reason", data.type); putExtra("timestamp", data.timestamp); putExtra("lat", data.latitude ?: 0.0); putExtra("lon", data.longitude ?: 0.0); putExtra("has_location", data.latitude != null); putExtra("maxG", data.maxG); putExtra("speed", data.speed)
-        }
-        val options = ActivityOptions.makeBasic()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) options.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE, options.toBundle())
-        val notification = NotificationCompat.Builder(this, INCIDENT_CHANNEL_ID).setSmallIcon(android.R.drawable.stat_sys_warning).setContentTitle("CRASH DETECTED").setPriority(NotificationCompat.PRIORITY_MAX).setCategory(NotificationCompat.CATEGORY_ALARM).setFullScreenIntent(pendingIntent, true).setAutoCancel(true).setOngoing(true).build()
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(INCIDENT_NOTIFICATION_ID, notification)
-        try { startActivity(intent, options.toBundle()) } catch (e: Exception) { }
-    }
-
-    private fun fetchBestLocation(): Location? {
-        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-        for (provider in providers) {
-            try {
-                val loc = locationManager.getLastKnownLocation(provider)
-                if (loc != null && System.currentTimeMillis() - loc.time < 60000) return loc
-            } catch (e: Exception) {}
-        }
-        return lastLocation
     }
 
     fun finalizeEmergencyDispatch(type: String, t: Long, lat: Double?, lon: Double?, maxG: Float, speed: Float) {
-        _currentState.value = IncidentState.DISPATCHING
         alertDispatcher.dispatch(currentSettings, type, t, lat, lon, maxG, speed)
+        serviceScope.launch {
+            val snapshot = pendingIncidentSnapshot ?: return@launch
+            val shortTypeName = type.split(":").last().trim().replace(" ", "")
+            val timestampStr = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date(t))
+            val baseFileName = "$timestampStr-$shortTypeName"
+
+            // 1. Save to Watch /Download folder (PERSISTENT)
+            savePersistentEvidence(snapshot, baseFileName)
+
+            // 2. Try Sync to mobile
+            try {
+                val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
+                val reportJson = explicitJson.encodeToString(snapshot)
+                for (node in nodes) {
+                    Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_REPORT, reportJson.toByteArray())
+                    
+                    serviceScope.launch {
+                        audioRecordingJob?.join() // Wait for 20s recording to finish
+                        recordedAudioFiles.forEachIndexed { idx, file ->
+                            if (file.exists()) {
+                                val asset = Asset.createFromBytes(file.readBytes())
+                                val dataMap = PutDataMapRequest.create(ProtocolContract.Paths.INCIDENT_AUDIO_ASSET).apply {
+                                    dataMap.putAsset(ProtocolContract.Keys.AUDIO_FILE, asset)
+                                    dataMap.putString("file_name", "$baseFileName-part${idx + 1}")
+                                    dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+                                }.asPutDataRequest().setUrgent()
+                                Wearable.getDataClient(this@SentinelService).putDataItem(dataMap).await()
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) { Log.e(TAG, "Sync failed, evidence preserved locally in /Download.") }
+            resetFsmAfterDispatch()
+        }
     }
 
-    private fun classifyImpact(accel: FloatArray, gyro: FloatArray, speed: Float) {
-        detectedType = if (accel[1] < 0) VehicleIncidentType.FRONTAL else VehicleIncidentType.REAR_END
+    private fun savePersistentEvidence(snapshot: IncidentData, baseName: String) {
+        try {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "watch2out")
+            if (!dir.exists()) dir.mkdirs()
+            
+            val jsonFile = File(dir, "$baseName.json")
+            FileOutputStream(jsonFile).use { it.write(explicitJson.encodeToString(snapshot).toByteArray()) }
+
+            serviceScope.launch {
+                audioRecordingJob?.join()
+                recordedAudioFiles.forEachIndexed { idx, file ->
+                    if (file.exists()) {
+                        val persistentAudio = File(dir, "$baseName-part${idx + 1}.aac")
+                        file.copyTo(persistentAudio, overwrite = true)
+                    }
+                }
+                Log.i(TAG, "📁 Persistent evidence saved to /Download/watch2out")
+            }
+        } catch (e: Exception) { Log.e(TAG, "Storage Error: ${e.message}") }
     }
 
-    private fun createNotificationChannels() {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Sentinel", NotificationManager.IMPORTANCE_LOW))
-        nm.createNotificationChannel(NotificationChannel(INCIDENT_CHANNEL_ID, "Alerts", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true); setBypassDnd(true) })
+    private fun resetFsmAfterDispatch() {
+        Log.w(TAG, "🏁 Incident handled. Resuming MONITORING.")
+        _currentState.value = IncidentState.MONITORING
+        vInferenceState = VehicleInferenceState.IDLE
+        detectedType = VehicleIncidentType.NONE
+        pendingIncidentSnapshot = null
+        isSimulatingLocked = false
+        currentGpsSpeed = 0f
+        prevGpsSpeed = 0f
+        lastMoveTime = System.currentTimeMillis()
+        broadcastStatusToMobile(_telemetry.value)
     }
 
-    private fun createForegroundNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("Watch2Out Active").setSmallIcon(android.R.drawable.ic_menu_mylocation).setOngoing(true).build()
-
-    private fun broadcastStatusToMobile(telemetry: TelemetryState) {
-        val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        val request = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
-            dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, _currentState.value == IncidentState.MONITORING)
-            dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, getSensorStatus(sm, Sensor.TYPE_ACCELEROMETER, currentSettings.isAccelEnabled).name)
-            dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, getSensorStatus(sm, Sensor.TYPE_GYROSCOPE, currentSettings.isGyroEnabled).name)
-            dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, getSensorStatus(sm, Sensor.TYPE_PRESSURE, currentSettings.isPressureEnabled).name)
-            dataMap.putString(ProtocolContract.Keys.ROT_STATUS, getSensorStatus(sm, Sensor.TYPE_ROTATION_VECTOR, true).name)
-            try { dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, explicitJson.encodeToString(TelemetryState.serializer(), telemetry)) } catch(e: Exception) {}
-            dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
-        }.asPutDataRequest().setUrgent()
-        Wearable.getDataClient(this).putDataItem(request)
+    private fun dismissIncidentInternal() {
+        Log.w(TAG, "Dismissing incident alert.")
+        audioRecordingJob?.cancel()
+        try { mediaRecorder?.stop() } catch (e: Exception) {}
+        mediaRecorder?.release()
+        mediaRecorder = null
+        recordedAudioFiles.forEach { it.delete() }
+        resetFsmAfterDispatch()
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(INCIDENT_NOTIFICATION_ID)
+        sendBroadcast(Intent("com.jinn.watch2out.DISMISS_ALERT").apply { setPackage(packageName) })
+        serviceScope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
+                for (node in nodes) Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_DISMISS, null)
+            } catch (e: Exception) {}
+        }
     }
 
-    private fun getSensorStatus(sm: SensorManager, type: Int, isEnabled: Boolean): SensorStatus {
-        val s = sm.getDefaultSensor(type); return when { s == null -> SensorStatus.MISSING; !isEnabled -> SensorStatus.DISABLED; else -> SensorStatus.AVAILABLE }
-    }
-
-    private fun magnitude(v: FloatArray) = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
-    private suspend fun handleSettingsChange(s: WatchSettings) { 
-        currentSettings = s
-        dataLogger.reconfigure(s)
-        if (_currentState.value == IncidentState.MONITORING || isDashboardActive) registerSensors() 
-    }
-    
-    fun resetPeaks() { 
+    private fun resetPeaks() { 
         overallPeak = TelemetryState().copy(sessionStartTime = System.currentTimeMillis())
         windowPeak = TelemetryState()
         sessionStartTime = System.currentTimeMillis()
         totalRotation = 0f
         lastGyroTimeNs = 0L
         lastSignificantMotionTime = System.currentTimeMillis()
-        vInferenceState = VehicleInferenceState.IDLE; detectedType = VehicleIncidentType.NONE; pendingIncidentSnapshot = null 
+        vInferenceState = VehicleInferenceState.IDLE
+        detectedType = VehicleIncidentType.NONE
+        pendingIncidentSnapshot = null
+        isSimulatingLocked = false
+        currentGpsSpeed = 0f
+        prevGpsSpeed = 0f
+        lastMoveTime = System.currentTimeMillis()
         broadcastStatusToMobile(_telemetry.value)
     }
 
     override fun onStartCommand(intent: Intent?, f: Int, s: Int): Int {
         when (intent?.action) {
-            ACTION_START_MONITORING -> { 
-                _currentState.value = IncidentState.MONITORING
-                if (sessionStartTime == 0L) {
-                    sessionStartTime = System.currentTimeMillis()
-                    totalRotation = 0f
-                    lastGyroTimeNs = 0L
-                    lastSignificantMotionTime = sessionStartTime
-                }
-                registerSensors() 
-            }
+            ACTION_START_MONITORING -> { _currentState.value = IncidentState.MONITORING; resetPeaks(); registerSensors() }
             ACTION_STOP_MONITORING -> { _currentState.value = IncidentState.IDLE; unregisterSensors() }
             ACTION_RESET_PEAKS -> resetPeaks()
             ACTION_DASHBOARD_START -> { isDashboardActive = true; registerSensors() }
@@ -450,21 +501,23 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
     @SuppressLint("MissingPermission")
     private fun registerSensors() { 
         unregisterSensors()
-        try { 
-            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
-                locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, this)
-            }
-            val rateUs = (dynamicRateMs * 1000).coerceAtLeast(10000)
-            val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-            if (accel != null) sensorManager.registerListener(this, accel, rateUs)
-            val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-            if (gyro != null) sensorManager.registerListener(this, gyro, rateUs)
-            val press = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
-            if (press != null) sensorManager.registerListener(this, press, SensorManager.SENSOR_DELAY_UI)
-            val rot = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-            if (rot != null) sensorManager.registerListener(this, rot, SensorManager.SENSOR_DELAY_UI)
-        } catch (e: Exception) { Log.e(TAG, "Sensor registration failed: ${e.message}") } 
+        Handler(Looper.getMainLooper()).post {
+            try { 
+                if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
+                    locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, this)
+                }
+                val rateUs = (dynamicRateMs * 1000).coerceAtLeast(10000)
+                val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+                if (accel != null) sensorManager.registerListener(this, accel, rateUs)
+                val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+                if (gyro != null) sensorManager.registerListener(this, gyro, rateUs)
+                val press = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
+                if (press != null) sensorManager.registerListener(this, press, SensorManager.SENSOR_DELAY_UI)
+                val rot = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+                if (rot != null) sensorManager.registerListener(this, rot, SensorManager.SENSOR_DELAY_UI)
+            } catch (e: Exception) { Log.e(TAG, "Sensor registration failed: ${e.message}") } 
+        }
     }
     
     private fun unregisterSensors() { sensorManager.unregisterListener(this); locationManager.removeUpdates(this) }
@@ -480,17 +533,12 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
                 Sensor.TYPE_GYROSCOPE -> {
                     val dx = event.values[0]; val dy = event.values[1]; val dz = event.values[2]
                     currentReading[3] = dx; currentReading[4] = dy; currentReading[5] = dz
-                    
                     val now = System.nanoTime()
                     if (lastGyroTimeNs != 0L) {
                         val dt = (now - lastGyroTimeNs) / 1_000_000_000f
                         val mag = sqrt(dx*dx + dy*dy + dz*dz)
-                        if (mag > 1.05f) {
-                            totalRotation += mag * dt * 57.2958f
-                        } else {
-                            totalRotation *= 0.95f
-                            if (totalRotation < 1.0f) totalRotation = 0f
-                        }
+                        if (mag > 1.05f) { totalRotation += mag * dt * 57.2958f }
+                        else { totalRotation *= 0.95f; if (totalRotation < 1.0f) totalRotation = 0f }
                     }
                     lastGyroTimeNs = now
                     if (totalRotation >= 360f) totalRotation = 0f
@@ -518,17 +566,107 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
 
     override fun onAccuracyChanged(s: Sensor?, a: Int) {}
 
-    private fun dismissIncidentInternal() {
-        _currentState.value = IncidentState.MONITORING
-        vInferenceState = VehicleInferenceState.IDLE
-        detectedType = VehicleIncidentType.NONE
-        pendingIncidentSnapshot = null
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(INCIDENT_NOTIFICATION_ID)
-        sendBroadcast(Intent("com.jinn.watch2out.DISMISS_ALERT").apply { setPackage(packageName) })
-        serviceScope.launch { try { val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await() ; for (node in nodes) { Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_DISMISS, null) } } catch (e: Exception) {} }
+    override fun onDestroy() { super.onDestroy() ; serviceScope.cancel() }
+
+    private fun magnitude(v: FloatArray) = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+
+    private fun fetchBestLocation(): Location? {
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+        for (provider in providers) {
+            try {
+                val loc = locationManager.getLastKnownLocation(provider)
+                if (loc != null && System.currentTimeMillis() - loc.time < 60000) return loc
+            } catch (e: Exception) {}
+        }
+        return lastLocation
     }
 
-    override fun onDestroy() { super.onDestroy() ; serviceScope.cancel() }
+    private fun classifyImpact(accel: FloatArray, gyro: FloatArray, speed: Float) {
+        detectedType = if (accel[1] < 0) VehicleIncidentType.FRONTAL else VehicleIncidentType.REAR_END
+    }
+
+    private fun createNotificationChannels() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Sentinel", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(INCIDENT_CHANNEL_ID, "Alerts", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true); setBypassDnd(true) })
+    }
+
+    private fun createForegroundNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("Watch2Out Active").setSmallIcon(android.R.drawable.ic_menu_mylocation).setOngoing(true).build()
+
+    private fun broadcastStatusToMobile(telemetry: TelemetryState) {
+        val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val request = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
+            dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, _currentState.value == IncidentState.MONITORING)
+            dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, getSensorStatus(sm, Sensor.TYPE_ACCELEROMETER, currentSettings.isAccelEnabled).name)
+            dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, getSensorStatus(sm, Sensor.TYPE_GYROSCOPE, currentSettings.isGyroEnabled).name)
+            dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, getSensorStatus(sm, Sensor.TYPE_PRESSURE, currentSettings.isPressureEnabled).name)
+            dataMap.putString(ProtocolContract.Keys.ROT_STATUS, getSensorStatus(sm, Sensor.TYPE_ROTATION_VECTOR, true).name)
+            try { dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, explicitJson.encodeToString(TelemetryState.serializer(), telemetry)) } catch(e: Exception) {}
+            dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+        }.asPutDataRequest().setUrgent()
+         Wearable.getDataClient(this).putDataItem(request)
+    }
+
+    private fun getSensorStatus(sm: SensorManager, type: Int, isEnabled: Boolean): SensorStatus {
+        val s = sm.getDefaultSensor(type); return when { s == null -> SensorStatus.MISSING; !isEnabled -> SensorStatus.DISABLED; else -> SensorStatus.AVAILABLE }
+    }
+
+    private suspend fun handleSettingsChange(s: WatchSettings) { 
+        currentSettings = s
+        dataLogger.reconfigure(s)
+        if (_currentState.value == IncidentState.MONITORING || isDashboardActive) registerSensors() 
+    }
+
+    private fun onIncidentDetected() {
+        if (_currentState.value == IncidentState.TRIGGERED && !isSimulatingLocked) return
+        val data = pendingIncidentSnapshot ?: return
+        _currentState.value = IncidentState.TRIGGERED
+        val wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "WWOut:IncidentWake")
+        wakeLock.acquire(30000)
+        serviceScope.launch {
+            try {
+                val json = explicitJson.encodeToString(data)
+                val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
+                for (node in nodes) Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_START, json.toByteArray())
+            } catch (e: Exception) {}
+        }
+        val intent = Intent(this, IncidentAlertActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("reason", data.type); putExtra("timestamp", data.timestamp); putExtra("lat", data.latitude ?: 0.0); putExtra("lon", data.longitude ?: 0.0); putExtra("has_location", data.latitude != null); putExtra("maxG", data.maxG); putExtra("speed", data.speed)
+        }
+        val options = ActivityOptions.makeBasic()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) options.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE, options.toBundle())
+        val notification = NotificationCompat.Builder(this, INCIDENT_CHANNEL_ID).setSmallIcon(android.R.drawable.stat_sys_warning).setContentTitle("CRASH DETECTED").setPriority(NotificationCompat.PRIORITY_MAX).setCategory(NotificationCompat.CATEGORY_ALARM).setFullScreenIntent(pendingIntent, true).setAutoCancel(true).setOngoing(true).build()
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(INCIDENT_NOTIFICATION_ID, notification)
+        try { startActivity(intent, options.toBundle()) } catch (e: Exception) {}
+    }
+
+    fun simulateIncident(path: String) {
+        isSimulatingLocked = true; 
+        captureIncidentSnapshot("Simulated Incident")
+        startEvidenceRecording()
+        serviceScope.launch { delay(500); onIncidentDetected(); isSimulatingLocked = false }
+    }
+
+    fun injectCustomSensorData(csv: String) {
+        serviceScope.launch {
+            isSimulatingLocked = true
+            try {
+                val p = csv.split(",").map { it.trim().toFloat() }
+                if (p.size >= 6) {
+                    val accel = floatArrayOf(p[0], p[1], p[2])
+                    synchronized(currentReading) { 
+                        currentReading[0] = p[0]; currentReading[1] = p[1]; currentReading[2] = p[2]
+                        currentReading[6] = p[5]; currentGpsSpeed = p[4] / 3.6f; currentReading[11] = currentGpsSpeed
+                    }
+                    updateVehicleInference(accel, floatArrayOf(p[3], 0f, 0f), p[4] / 3.6f, p[5])
+                    delay(1000)
+                    for (i in 1..3) { updateVehicleInference(floatArrayOf(0f, 0f, 9.81f), floatArrayOf(0f, 0f, 0f), 0f, p[5]); delay(1000) }
+                }
+            } finally { isSimulatingLocked = false }
+        }
+    }
 
     companion object {
         private const val NOTIFICATION_ID = 1001

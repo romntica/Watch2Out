@@ -209,7 +209,7 @@ class MainActivity : ComponentActivity(),
                         sensorStates["G"] = parseStatus(dataMap.getString(ProtocolContract.Keys.GYRO_STATUS))
                         sensorStates["P"] = parseStatus(dataMap.getString(ProtocolContract.Keys.PRESS_STATUS))
                         sensorStates["R"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ROT_STATUS))
-                        
+
                         dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json -> 
                             try { telemetryState.value = explicitJson.decodeFromString<TelemetryState>(json) } catch(e: Exception) { } 
                         }
