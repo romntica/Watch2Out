@@ -42,6 +42,9 @@ object ProtocolContract {
         
         // Asset Transfer (v23.0)
         const val INCIDENT_AUDIO_ASSET = "$BASE/incident/audio"
+
+        // Telemetry Logging (v27.4)
+        const val TELEMETRY_LOG = "$BASE/log/telemetry"
     }
     
     object Keys {
@@ -54,6 +57,10 @@ object ProtocolContract {
         const val GYRO_STATUS = "gyro_status"
         const val PRESS_STATUS = "press_status"
         const val ROT_STATUS = "rot_status"
+        const val LOC_STATUS = "loc_status"
+        const val MIC_STATUS = "mic_status"
+        const val SMS_STATUS = "sms_status"
+        const val CALL_STATUS = "call_status"
         const val INCIDENT_JSON = "incident_json"
         const val AUDIO_FILE = "audio_file"
         const val CUSTOM_SENSOR_DATA = "custom_sensor_data"

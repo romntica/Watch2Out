@@ -1,0 +1,71 @@
+# Project-Wide Rules for Watch² Out (Android/Kotlin)
+
+You are assisting with a safety-critical professional project. All generated code must be safe, deterministic, and maintainable for long‑term production use.
+
+## 1. General behavior
+
+- Always respect existing architecture, conventions, and documentation in the repository.
+- Prefer **working, production‑ready code** over speculative or half‑implemented ideas.
+- When requirements are ambiguous, explicitly surface assumptions in comments or TODOs rather than silently guessing.
+- Never delete or rewrite established logic, protocols, or documentation unless explicitly requested.
+
+## 2. Language, style, and safety
+
+- Use explicit null handling. **Do not use `!!`** in production code. Use `requireNotNull` or `checkNotNull` if an invariant is violated.
+- Avoid `lateinit` in services, background workers, and core logic. Prefer constructor injection or nullable types with explicit checks.
+- Follow idiomatic Kotlin style (scoped functions, data classes, sealed classes where appropriate).
+- All public APIs must include **KDoc** in clear, easy English describing purpose, parameters, return values, and important edge cases.
+
+## 3. Concurrency and coroutines
+
+- Use **`SupervisorJob` + dedicated `CoroutineScope`** for long‑lived components (e.g., services, view models).
+- **Do not use `GlobalScope`.** Prefer lifecycle‑aware scopes or explicitly managed scopes.
+- Avoid blocking calls (`Thread.sleep`, blocking I/O) on main or UI‑related dispatchers. Use `withContext(Dispatchers.IO)` for file and network operations.
+- Ensure proper cancellation and cleanup of coroutines when the owning component is destroyed.
+
+## 4. Resource management and performance
+
+- **Zero-Allocation Policy**: Do not allocate new objects in tight loops or high‑frequency callbacks (e.g., `onSensorChanged`, animation frames).
+- Prefer pre‑allocated buffers and primitive arrays for performance‑critical paths (e.g., circular buffers for telemetry).
+- Always unregister listeners, sensors, receivers, and callbacks in the appropriate lifecycle method (e.g., `onDestroy`, `onStop`).
+
+## 5. Architecture and responsibilities
+
+- Follow **SOLID** principles:
+  - Each class or component should have a **single responsibility**.
+  - Depend on **interfaces/abstractions**, not concrete implementations.
+- Clearly separate:
+  - **UI / Presentation layer** (Compose, ViewModels)
+  - **Domain / Business logic layer** (FSM, CrashScore, Use-cases)
+  - **Data / Integration layer** (Repositories, Network, Storage)
+- In multi‑module projects:
+  - Keep **shared models and contracts** in the `:shared` module (pure Kotlin/Android-free).
+  - Do not leak UI dependencies into core or shared modules.
+
+## 6. Data Persistence & Telemetry
+
+- **Store-and-Forward**: For non-live data, prioritize local persistence (Batching) before transmission.
+- **Confirmation-based Deletion**: Never delete local logs or evidence until the transport layer (e.g., `MessageClient`) confirms successful delivery.
+- **Privacy**: Implement immediate deletion of sensitive data (audio/GPS) if a user dismisses an incident alert.
+
+## 7. Error handling and robustness
+
+- Handle expected error cases explicitly (I/O failures, IPC errors, null responses).
+- Prefer **fail‑fast** behavior with clear logged messages over silent failures.
+- For cross‑process interactions (Wearable Data Layer), explicitly handle connection timeouts and node unavailability.
+
+## 8. Interaction with the AI assistant
+
+- When generating Kotlin code:
+  - Start snippets with a comment indicating the intended module, e.g.:
+    - `// [Module: :wear]`, `// [Module: :app]`, or `// [Module: :shared]`
+  - Provide complete, compilable examples (including necessary imports).
+- When modifying existing code:
+  - Preserve existing structure and naming unless a refactor is explicitly requested.
+  - Clearly highlight behavior changes in comments.
+
+## 9. Documentation and rationale
+
+- Comments should explain **why** key thresholds (G-force, sampling rates, timeouts) were chosen.
+- Use clear, easy English in all comments and documentation.
+- Refer to `AGENTS.md` for project-specific safety-critical thresholds and FSM state definitions.

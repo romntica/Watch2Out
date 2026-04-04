@@ -13,7 +13,7 @@ import com.jinn.watch2out.wear.service.SentinelService
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            val serviceIntent = Intent(context, SentinelService::class.java).apply {
+            val serviceIntent: Intent = Intent(context, SentinelService::class.java).apply {
                 action = SentinelService.ACTION_START_MONITORING
             }
             context.startForegroundService(serviceIntent)

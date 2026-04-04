@@ -4,15 +4,17 @@ package com.jinn.watch2out.shared.model
 import kotlinx.serialization.Serializable
 
 /**
- * Detailed state machine for vehicle crash inference.
+ * Enhanced FSM for incident detection (v24.5).
  */
 @Serializable
 enum class VehicleInferenceState {
-    IDLE,               // Monitoring is active but no driving session detected
-    DRIVING,            // Driving session active (includes both moving and temporary stationary states)
-    PRE_IMPACT,         // Pre-impact indicators detected (e.g., emergency braking, high RMS)
-    PLUNGING,           // Vehicle is in free-fall (low-G)
-    IMPACT_DETECTED,    // High-G impact event occurred
-    POST_IMPACT_MOTION, // Analyzing post-impact behavior (e.g., rollovers, secondary impacts)
-    STILLNESS           // Movement has ceased, verifying user safety
+    IDLE,               // Monitoring active, no significant motion
+    MOVING,             // Sustained movement detected (>15km/h)
+    PRE_EVENT,          // Universal gateway for potential incidents (External force >5G)
+    FALLING,            // Low-G state detected (<0.3G)
+    IMPACT,             // Confirmed high-G impact with sensor fusion
+    POST_MOTION,        // Post-impact analysis (Rolling/Rotation)
+    STILLNESS,          // Movement ceased, evaluating crash severity
+    WAIT_CONFIRM,       // Severity verified, awaiting user response
+    CONFIRMED_CRASH     // Crash confirmed (Timeout or Manual)
 }

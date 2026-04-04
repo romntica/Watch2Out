@@ -5,8 +5,7 @@ import kotlinx.serialization.Serializable
 
 /**
  * Snapshot of processed sensor metrics and system state.
- * Updated to v22.0 requirements: includes speed drop, directional acceleration peaks,
- * and advanced metrics like GyroRatio and RollSum.
+ * Updated to v27.0 requirements: includes advanced scoring metrics for debugging and tuning.
  */
 @Serializable
 data class TelemetryState(
@@ -45,6 +44,25 @@ data class TelemetryState(
     val crashScore: Float = 0f,
     val gyroRatio: Float = 0f,
     val rollSum: Float = 0f,
+    val sensorConfidence: Float = 1.0f,
+    val isGpsActive: Boolean = false,
+
+    // CrashScore v27 Debug & Tuning
+    val bonusWeak: Float = 0f,
+    val bonusFall: Float = 0f,
+    val bonusImpact: Float = 0f,
+    val nAccel: Float = 0f,
+    val nSpeed: Float = 0f,
+    val nGyro: Float = 0f,
+    val nPress: Float = 0f,
+    val nStill: Float = 0f,
+    val nRoll: Float = 0f,
+    val wAccel: Float = 0f,
+    val wSpeed: Float = 0f,
+    val wGyro: Float = 0f,
+    val wPress: Float = 0f,
+    val wStill: Float = 0f,
+    val wRoll: Float = 0f,
 
     // Overall Peak Data (All-time or since reset)
     val pTimestamp: Long = 0L,

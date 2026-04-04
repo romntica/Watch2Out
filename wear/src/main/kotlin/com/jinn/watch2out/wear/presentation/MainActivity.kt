@@ -5,10 +5,13 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -25,7 +28,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
-import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.material.*
 import com.google.android.gms.wearable.*
 import com.jinn.watch2out.shared.model.*
@@ -202,10 +204,8 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
                 }
                 is WearNavScreen.Dashboard -> {
                     DisposableEffect(Unit) {
-                        Log.d("WatchApp", "Entering Dashboard")
                         context.startService(Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_START })
                         onDispose {
-                            Log.d("WatchApp", "Exiting Dashboard")
                             context.startService(Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_STOP })
                         }
                     }
@@ -233,17 +233,31 @@ fun MainScreen(
     val context = LocalContext.current
     val sensorStatuses = remember(settings) {
         val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val pm = context.packageManager
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        
+        val hasSms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_MESSAGING)
+        } else {
+            @Suppress("DEPRECATION")
+            pm.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
+        }
+        val hasVoice = tm.phoneType != TelephonyManager.PHONE_TYPE_NONE
+
         mapOf(
-            "A" to getSensorStatus(sm, Sensor.TYPE_ACCELEROMETER, settings.isAccelEnabled),
-            "G" to getSensorStatus(sm, Sensor.TYPE_GYROSCOPE, settings.isGyroEnabled),
-            "P" to getSensorStatus(sm, Sensor.TYPE_PRESSURE, settings.isPressureEnabled),
-            "R" to getSensorStatus(sm, Sensor.TYPE_ROTATION_VECTOR, true)
+            "A" to getSensorStatus(sm, Sensor.TYPE_ACCELEROMETER),
+            "G" to getSensorStatus(sm, Sensor.TYPE_GYROSCOPE),
+            "P" to getSensorStatus(sm, Sensor.TYPE_PRESSURE),
+            "R" to getSensorStatus(sm, Sensor.TYPE_ROTATION_VECTOR),
+            "L" to if (pm.hasSystemFeature(PackageManager.FEATURE_LOCATION_GPS)) SensorStatus.AVAILABLE else SensorStatus.MISSING,
+            "M" to if (pm.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)) SensorStatus.AVAILABLE else SensorStatus.MISSING,
+            "T" to if (hasSms || hasVoice) SensorStatus.AVAILABLE else SensorStatus.MISSING
         )
     }
 
     Box(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 sensorStatuses.forEach { (label, status) -> SensorIndicator(label, status) }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -265,10 +279,10 @@ fun MainScreen(
 @Composable
 fun SensorIndicator(label: String, status: SensorStatus) {
     val bgColor = when (status) { SensorStatus.AVAILABLE -> Color.Green; SensorStatus.DISABLED -> Color.DarkGray; SensorStatus.UNAVAILABLE -> Color.Red; SensorStatus.MISSING -> Color.Gray; SensorStatus.UNKNOWN -> Color.Gray }
-    Box(modifier = Modifier.size(16.dp).background(bgColor, CircleShape), contentAlignment = Alignment.Center) { Text(text = label, color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+    Box(modifier = Modifier.size(14.dp).background(bgColor, CircleShape), contentAlignment = Alignment.Center) { Text(text = label, color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Bold) }
 }
 
-fun getSensorStatus(sm: SensorManager, type: Int, isEnabledInSettings: Boolean): SensorStatus {
+fun getSensorStatus(sm: SensorManager, type: Int): SensorStatus {
     val sensor = sm.getDefaultSensor(type)
-    return when { sensor == null -> SensorStatus.MISSING; !isEnabledInSettings -> SensorStatus.DISABLED; else -> SensorStatus.AVAILABLE }
+    return if (sensor == null) SensorStatus.MISSING else SensorStatus.AVAILABLE
 }

@@ -11,15 +11,20 @@ import kotlinx.coroutines.flow.map
 
 private val Context.dataStore by preferencesDataStore(name = "settings")
 
+/**
+ * Persists and provides access to WatchSettings.
+ * v27.4: Added telemetry logging toggle.
+ */
 class SettingsRepository(private val context: Context) {
     private object Keys {
-        val IS_ACCEL_ENABLED = booleanPreferencesKey("is_accel_enabled")
         val ACCEL_THRESHOLD_G = floatPreferencesKey("accel_threshold_g")
-        val IS_GYRO_ENABLED = booleanPreferencesKey("is_gyro_enabled")
         val GYRO_THRESHOLD_DEG = floatPreferencesKey("gyro_threshold_deg")
-        val IS_PRESSURE_ENABLED = booleanPreferencesKey("is_pressure_enabled")
         val PRESSURE_THRESHOLD_HPA = floatPreferencesKey("pressure_threshold_hpa")
         
+        val SPEED_DELTA_KMH = floatPreferencesKey("speed_delta_kmh")
+        val STILLNESS_DURATION_MS = longPreferencesKey("stillness_duration_ms")
+        val CRASH_SCORE_THRESHOLD = floatPreferencesKey("crash_score_threshold")
+
         val BUFFER_SECONDS = intPreferencesKey("buffer_seconds")
         val SAMPLING_RATE_MS = intPreferencesKey("sampling_rate_ms")
         val SIMULATION_MODE = booleanPreferencesKey("simulation_mode")
@@ -32,16 +37,19 @@ class SettingsRepository(private val context: Context) {
         val SMS_RECIPIENT = stringPreferencesKey("sms_recipient")
         val IS_CALL_ENABLED = booleanPreferencesKey("is_call_enabled")
         val CALL_RECIPIENT = stringPreferencesKey("call_recipient")
+
+        // v27.4
+        val IS_TELEMETRY_LOGGING_ENABLED = booleanPreferencesKey("is_telemetry_logging_enabled")
     }
 
     val settingsFlow: Flow<WatchSettings> = context.dataStore.data.map { prefs ->
         WatchSettings(
-            isAccelEnabled = prefs[Keys.IS_ACCEL_ENABLED] ?: true,
-            accelThresholdG = prefs[Keys.ACCEL_THRESHOLD_G] ?: 15.0f,
-            isGyroEnabled = prefs[Keys.IS_GYRO_ENABLED] ?: true,
-            gyroThresholdDeg = prefs[Keys.GYRO_THRESHOLD_DEG] ?: 300.0f,
-            isPressureEnabled = prefs[Keys.IS_PRESSURE_ENABLED] ?: true,
-            pressureThresholdHpa = prefs[Keys.PRESSURE_THRESHOLD_HPA] ?: 1.5f,
+            accelThresholdG = prefs[Keys.ACCEL_THRESHOLD_G] ?: 10.0f,
+            gyroThresholdDeg = prefs[Keys.GYRO_THRESHOLD_DEG] ?: 200.0f,
+            pressureThresholdHpa = prefs[Keys.PRESSURE_THRESHOLD_HPA] ?: 2.5f,
+            speedDeltaKmh = prefs[Keys.SPEED_DELTA_KMH] ?: 20.0f,
+            stillnessDurationMs = prefs[Keys.STILLNESS_DURATION_MS] ?: 8000L,
+            crashScoreThreshold = prefs[Keys.CRASH_SCORE_THRESHOLD] ?: 0.7f,
             bufferSeconds = prefs[Keys.BUFFER_SECONDS] ?: 10,
             samplingRateMs = prefs[Keys.SAMPLING_RATE_MS] ?: 100,
             isSimulationMode = prefs[Keys.SIMULATION_MODE] ?: false,
@@ -53,18 +61,19 @@ class SettingsRepository(private val context: Context) {
             isSmsEnabled = prefs[Keys.IS_SMS_ENABLED] ?: true,
             smsRecipient = prefs[Keys.SMS_RECIPIENT] ?: "",
             isCallEnabled = prefs[Keys.IS_CALL_ENABLED] ?: false,
-            callRecipient = prefs[Keys.CALL_RECIPIENT] ?: ""
+            callRecipient = prefs[Keys.CALL_RECIPIENT] ?: "",
+            isTelemetryLoggingEnabled = prefs[Keys.IS_TELEMETRY_LOGGING_ENABLED] ?: false
         )
     }
 
     suspend fun updateSettings(settings: WatchSettings) {
         context.dataStore.edit { prefs ->
-            prefs[Keys.IS_ACCEL_ENABLED] = settings.isAccelEnabled
             prefs[Keys.ACCEL_THRESHOLD_G] = settings.accelThresholdG
-            prefs[Keys.IS_GYRO_ENABLED] = settings.isGyroEnabled
             prefs[Keys.GYRO_THRESHOLD_DEG] = settings.gyroThresholdDeg
-            prefs[Keys.IS_PRESSURE_ENABLED] = settings.isPressureEnabled
             prefs[Keys.PRESSURE_THRESHOLD_HPA] = settings.pressureThresholdHpa
+            prefs[Keys.SPEED_DELTA_KMH] = settings.speedDeltaKmh
+            prefs[Keys.STILLNESS_DURATION_MS] = settings.stillnessDurationMs
+            prefs[Keys.CRASH_SCORE_THRESHOLD] = settings.crashScoreThreshold
             prefs[Keys.BUFFER_SECONDS] = settings.bufferSeconds
             prefs[Keys.SAMPLING_RATE_MS] = settings.samplingRateMs
             prefs[Keys.SIMULATION_MODE] = settings.isSimulationMode
@@ -75,6 +84,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.SMS_RECIPIENT] = settings.smsRecipient
             prefs[Keys.IS_CALL_ENABLED] = settings.isCallEnabled
             prefs[Keys.CALL_RECIPIENT] = settings.callRecipient
+            prefs[Keys.IS_TELEMETRY_LOGGING_ENABLED] = settings.isTelemetryLoggingEnabled
         }
     }
 }

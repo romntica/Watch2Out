@@ -14,7 +14,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Receives EDR logs and Audio assets from the Watch and saves them to the Download folder.
+ * Receives EDR logs, Audio assets, and Telemetry logs from the Watch.
+ * v27.4: Added Telemetry Logging support for daily review.
  */
 class MobileMessageService : WearableListenerService() {
 
@@ -22,9 +23,14 @@ class MobileMessageService : WearableListenerService() {
     private val TAG = "MobileMessageService"
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
-        if (messageEvent.path == ProtocolContract.Paths.INCIDENT_REPORT) {
-            val json = String(messageEvent.data)
-            saveIncidentJson(json)
+        when (messageEvent.path) {
+            ProtocolContract.Paths.INCIDENT_REPORT -> {
+                val json = String(messageEvent.data)
+                saveIncidentJson(json)
+            }
+            ProtocolContract.Paths.TELEMETRY_LOG -> {
+                saveTelemetryLog(messageEvent.data)
+            }
         }
     }
 
@@ -57,6 +63,22 @@ class MobileMessageService : WearableListenerService() {
             Log.i(TAG, "📁 Saved EDR Log: ${file.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save JSON: ${e.message}")
+        }
+    }
+
+    private fun saveTelemetryLog(data: ByteArray) {
+        try {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "watch2out/telemetry")
+            if (!dir.exists()) dir.mkdirs()
+            
+            // Format: YYYYMMDD-HHMMSS-telemetry.json
+            val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date())
+            val file = File(dir, "$timestamp-telemetry.json")
+            
+            FileOutputStream(file).use { it.write(data) }
+            Log.d(TAG, "📊 Saved Telemetry Batch: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save telemetry log: ${e.message}")
         }
     }
 

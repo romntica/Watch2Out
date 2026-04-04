@@ -10,16 +10,19 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
 import androidx.wear.input.RemoteInputIntentHelper
-import com.jinn.watch2out.shared.model.SimulationDetectionMode
 import com.jinn.watch2out.shared.model.WatchSettings
+import java.util.Locale
 
+/**
+ * Advanced configuration for the Sentinel system on Wear OS.
+ * v27.4: Added Telemetry Logging toggle.
+ */
 @Composable
 fun SettingsScreen(
     currentSettings: WatchSettings,
@@ -27,29 +30,17 @@ fun SettingsScreen(
     onCancel: () -> Unit,
     onInjectCustomData: (String) -> Unit
 ) {
-    // 1. Sensor States
-    var isAccelEnabled by remember { mutableStateOf(currentSettings.isAccelEnabled) }
+    // 1. Core Thresholds
     var accelThreshold by remember { mutableFloatStateOf(currentSettings.accelThresholdG) }
-    var isGyroEnabled by remember { mutableStateOf(currentSettings.isGyroEnabled) }
     var gyroThreshold by remember { mutableFloatStateOf(currentSettings.gyroThresholdDeg) }
-    var isPressureEnabled by remember { mutableStateOf(currentSettings.isPressureEnabled) }
     var pressureThreshold by remember { mutableFloatStateOf(currentSettings.pressureThresholdHpa) }
-
-    // 2. Buffer, Interval & Simulation
-    var bufferTime by remember { mutableIntStateOf(currentSettings.bufferSeconds) }
-    var samplingRateMs by remember { mutableIntStateOf(currentSettings.samplingRateMs) }
+    var speedDelta by remember { mutableFloatStateOf(currentSettings.speedDeltaKmh) }
+    var stillnessDurationSec by remember { mutableFloatStateOf(currentSettings.stillnessDurationMs / 1000f) }
+    var crashScoreThreshold by remember { mutableFloatStateOf(currentSettings.crashScoreThreshold) }
+    
+    // 2. System & Simulation States
     var simulationMode by remember { mutableStateOf(currentSettings.isSimulationMode) }
-    var forcedMode by remember { mutableStateOf(currentSettings.forcedDetectionMode) }
-
-    // 3. Custom Injection UI States (Same as Mobile)
-    var rawAccelX by remember { mutableStateOf("0.0") }
-    var rawAccelY by remember { mutableStateOf("0.0") }
-    var rawAccelZ by remember { mutableStateOf("9.8") }
-    var rawGyroX by remember { mutableStateOf("0.0") }
-    var rawSpeed by remember { mutableStateOf("20.0") }
-    var rawPressure by remember { mutableStateOf("1013.25") }
-
-    // 4. Notification & Policy States
+    var isTelemetryLoggingEnabled by remember { mutableStateOf(currentSettings.isTelemetryLoggingEnabled) }
     var isSmsEnabled by remember { mutableStateOf(currentSettings.isSmsEnabled) }
     var smsRecipient by remember { mutableStateOf(currentSettings.smsRecipient) }
     var isCallEnabled by remember { mutableStateOf(currentSettings.isCallEnabled) }
@@ -57,25 +48,24 @@ fun SettingsScreen(
     var useWatchDirectDispatch by remember { mutableStateOf(currentSettings.useWatchDirectDispatch) }
     var isAutoStartEnabled by remember { mutableStateOf(currentSettings.isAutoStartEnabled) }
 
-    val bufferOptions = listOf(0, 1, 5, 10, 15)
-    val intervalOptions = listOf(100, 200, 300, 500)
-
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize(),
         autoCentering = AutoCenteringParams(itemIndex = 0),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        item { ListHeader { Text("Settings") } }
+        item { ListHeader { Text("Threshold Config", color = Color.Cyan) } }
 
-        // --- Sensors Section ---
-        item { Text("Sensors", style = MaterialTheme.typography.caption1) }
-        item { ThresholdSliderWithToggle("Accel", accelThreshold, "G", isAccelEnabled, { isAccelEnabled = it }, { accelThreshold = it }, 5f..30f, 25) }
-        item { ThresholdSliderWithToggle("Gyro", gyroThreshold, "°/s", isGyroEnabled, { isGyroEnabled = it }, { gyroThreshold = it }, 100f..1000f, 18) }
-        item { ThresholdSliderWithToggle("Pressure", pressureThreshold, "hPa", isPressureEnabled, { isPressureEnabled = it }, { pressureThreshold = it }, 0.5f..5.0f, 45) }
+        // --- Core Thresholds ---
+        item { ThresholdAdjuster("Accel", accelThreshold, "G", 8f..20f, 0.5f) { accelThreshold = it } }
+        item { ThresholdAdjuster("Gyro", gyroThreshold, "°/s", 100f..500f, 10f) { gyroThreshold = it } }
+        item { ThresholdAdjuster("Baro", pressureThreshold, "hPa", 1.0f..5.0f, 0.1f) { pressureThreshold = it } }
+        item { ThresholdAdjuster("Δv", speedDelta, "km/h", 10f..50f, 1f) { speedDelta = it } }
+        item { ThresholdAdjuster("Still", stillnessDurationSec, "s", 3f..15f, 1f) { stillnessDurationSec = it } }
+        item { ThresholdAdjuster("Score", crashScoreThreshold, "", 0.5f..0.9f, 0.05f) { crashScoreThreshold = it } }
 
-        // --- Simulation Mode ---
-        item { ListHeader { Text("Simulation") } }
+        // --- Simulation & Logging ---
+        item { ListHeader { Text("Simulation & Logs") } }
         item {
             ToggleChip(
                 checked = simulationMode, onCheckedChange = { simulationMode = it },
@@ -83,56 +73,32 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth()
             )
         }
-
-        if (simulationMode) {
-            item { Text("Quick Presets", style = MaterialTheme.typography.caption2, color = Color.Yellow) }
-            item {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    CompactChip(onClick = { rawAccelX = "0.0"; rawAccelY = "-80.0"; rawAccelZ = "0.0"; rawGyroX = "0.0"; rawSpeed = "20.0"; rawPressure = "1000.0" }, label = { Text("Front", fontSize = 9.sp) })
-                    CompactChip(onClick = { rawAccelX = "0.0"; rawAccelY = "30.0"; rawAccelZ = "0.0"; rawGyroX = "5.0"; rawSpeed = "0.5"; rawPressure = "1000.0" }, label = { Text("Rear", fontSize = 9.sp) })
-                    CompactChip(onClick = { rawAccelX = "60.0"; rawAccelY = "0.0"; rawAccelZ = "0.0"; rawGyroX = "0.0"; rawSpeed = "15.0"; rawPressure = "1000.0" }, label = { Text("Side", fontSize = 9.sp) })
-                    CompactChip(onClick = { rawAccelX = "0.0"; rawAccelY = "0.0"; rawAccelZ = "1.0"; rawGyroX = "0.0"; rawSpeed = "20.0"; rawPressure = "1000.0" }, label = { Text("Fall", fontSize = 9.sp) })
-                }
-            }
-
-            item { Text("Raw Values (A_XYZ / G / S / P)", style = MaterialTheme.typography.caption2, color = Color.Cyan) }
-            item {
-                Text(
-                    text = "${rawAccelX}/${rawAccelY}/${rawAccelZ} | ${rawGyroX} | ${rawSpeed} | ${rawPressure}",
-                    style = MaterialTheme.typography.caption3, fontSize = 8.sp, color = Color.White
-                )
-            }
-            item {
-                Button(
-                    onClick = {
-                        val csv = "${rawAccelX},${rawAccelY},${rawAccelZ},${rawGyroX},${rawSpeed},${rawPressure}"
-                        onInjectCustomData(csv)
-                    },
-                    modifier = Modifier.fillMaxWidth(0.9f)
-                ) {
-                    Text("INJECT EVENT", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
+        item {
+            ToggleChip(
+                checked = isTelemetryLoggingEnabled, onCheckedChange = { isTelemetryLoggingEnabled = it },
+                label = { Text("Telemetry Log") }, toggleControl = { Switch(checked = isTelemetryLoggingEnabled, onCheckedChange = null) },
+                modifier = Modifier.fillMaxWidth()
+            )
         }
 
-        // --- Emergency Contacts Section ---
+        // --- Emergency Contacts ---
         item { ListHeader { Text("Emergency Contacts") } }
         item { NotificationContactItem("SMS", isSmsEnabled, smsRecipient, { isSmsEnabled = it }, { smsRecipient = it }, InputType.TYPE_CLASS_PHONE) }
         item { NotificationContactItem("Call", isCallEnabled, callRecipient, { isCallEnabled = it }, { callRecipient = it }, InputType.TYPE_CLASS_PHONE) }
 
-        // --- System & Dispatch Section ---
-        item { ListHeader { Text("System & Dispatch") } }
+        // --- System & Dispatch ---
+        item { ListHeader { Text("System") } }
         item {
             ToggleChip(
                 checked = isAutoStartEnabled, onCheckedChange = { isAutoStartEnabled = it },
-                label = { Text("Auto Start on Boot") }, toggleControl = { Switch(checked = isAutoStartEnabled, onCheckedChange = null) },
+                label = { Text("Auto Start") }, toggleControl = { Switch(checked = isAutoStartEnabled, onCheckedChange = null) },
                 modifier = Modifier.fillMaxWidth()
             )
         }
         item {
             ToggleChip(
                 checked = useWatchDirectDispatch, onCheckedChange = { useWatchDirectDispatch = it },
-                label = { Text("Watch Direct Dispatch") }, toggleControl = { Switch(checked = useWatchDirectDispatch, onCheckedChange = null) },
+                label = { Text("Direct Dispatch") }, toggleControl = { Switch(checked = useWatchDirectDispatch, onCheckedChange = null) },
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -143,14 +109,20 @@ fun SettingsScreen(
                 Button(
                     onClick = {
                         onApply(WatchSettings(
-                            isAccelEnabled = isAccelEnabled, accelThresholdG = accelThreshold,
-                            isGyroEnabled = isGyroEnabled, gyroThresholdDeg = gyroThreshold,
-                            isPressureEnabled = isPressureEnabled, pressureThresholdHpa = pressureThreshold,
-                            bufferSeconds = bufferTime, samplingRateMs = samplingRateMs,
-                            isSimulationMode = simulationMode, forcedDetectionMode = forcedMode,
-                            isAutoStartEnabled = isAutoStartEnabled, useWatchDirectDispatch = useWatchDirectDispatch,
-                            isSmsEnabled = isSmsEnabled, smsRecipient = smsRecipient,
-                            isCallEnabled = isCallEnabled, callRecipient = callRecipient
+                            accelThresholdG = accelThreshold,
+                            gyroThresholdDeg = gyroThreshold,
+                            pressureThresholdHpa = pressureThreshold,
+                            speedDeltaKmh = speedDelta,
+                            stillnessDurationMs = (stillnessDurationSec * 1000).toLong(),
+                            crashScoreThreshold = crashScoreThreshold,
+                            isSimulationMode = simulationMode,
+                            isTelemetryLoggingEnabled = isTelemetryLoggingEnabled,
+                            isAutoStartEnabled = isAutoStartEnabled,
+                            useWatchDirectDispatch = useWatchDirectDispatch,
+                            isSmsEnabled = isSmsEnabled,
+                            smsRecipient = smsRecipient,
+                            isCallEnabled = isCallEnabled,
+                            callRecipient = callRecipient
                         ))
                     },
                     modifier = Modifier.fillMaxWidth(0.9f)
@@ -164,21 +136,18 @@ fun SettingsScreen(
 }
 
 @Composable
-fun ThresholdSliderWithToggle(
-    label: String, value: Float, unit: String,
-    checked: Boolean, onCheckedChange: (Boolean) -> Unit,
-    onValueChange: (Float) -> Unit, valueRange: ClosedFloatingPointRange<Float>, steps: Int
-) {
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = checked, onCheckedChange = onCheckedChange)
-            Text(text = "$label: ${String.format("%.1f", value)}$unit", style = MaterialTheme.typography.caption2, modifier = Modifier.padding(start = 4.dp).alpha(if (checked) 1f else 0.5f))
+fun ThresholdAdjuster(label: String, value: Float, unit: String, range: ClosedFloatingPointRange<Float>, step: Float, onValueChange: (Float) -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("$label: ${if (unit == "hPa" || label == "Score") String.format(Locale.US, "%.2f", value) else value.toInt().toString()}$unit", style = MaterialTheme.typography.caption2)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+            Button(onClick = { onValueChange((value - step).coerceAtLeast(range.start)) }, modifier = Modifier.size(32.dp), colors = ButtonDefaults.secondaryButtonColors()) {
+                Text("-", fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Button(onClick = { onValueChange((value + step).coerceAtMost(range.endInclusive)) }, modifier = Modifier.size(32.dp), colors = ButtonDefaults.secondaryButtonColors()) {
+                Text("+", fontWeight = FontWeight.Bold)
+            }
         }
-        InlineSlider(
-            value = value, onValueChange = onValueChange, valueRange = valueRange, steps = steps, enabled = checked,
-            modifier = Modifier.fillMaxWidth().alpha(if (checked) 1f else 0.5f),
-            decreaseIcon = { Icon(InlineSliderDefaults.Decrease, "Dec") }, increaseIcon = { Icon(InlineSliderDefaults.Increase, "Inc") }
-        )
     }
 }
 
@@ -186,7 +155,7 @@ fun ThresholdSliderWithToggle(
 fun NotificationContactItem(
     label: String, enabled: Boolean, recipient: String,
     onToggle: (Boolean) -> Unit, onUpdateRecipient: (String) -> Unit,
-    inputType: Int = InputType.TYPE_CLASS_TEXT
+    inputType: Int = InputType.TYPE_CLASS_PHONE
 ) {
     val remoteInputKey = "extra_recipient"
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -208,7 +177,7 @@ fun NotificationContactItem(
                     launcher.launch(intent)
                 },
                 label = { Text(text = recipient.ifEmpty { "Tap to set" }, style = MaterialTheme.typography.caption2, maxLines = 1) },
-                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
             )
         }
     }

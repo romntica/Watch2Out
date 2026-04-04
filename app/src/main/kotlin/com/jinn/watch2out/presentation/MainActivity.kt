@@ -4,7 +4,6 @@ package com.jinn.watch2out.presentation
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
@@ -12,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -38,6 +38,7 @@ sealed class Screen {
     object Main : Screen()
     object Settings : Screen()
     object Dashboard : Screen()
+    object TelemetryLogs : Screen()
 }
 
 class MainActivity : ComponentActivity(),
@@ -87,7 +88,8 @@ class MainActivity : ComponentActivity(),
                             sensorStates = sensorStates,
                             onCommand = { cmd -> sendRemoteCommand(cmd) },
                             onNavigateToSettings = { requestWatchSettings(); currentScreen = Screen.Settings },
-                            onNavigateToDashboard = { currentScreen = Screen.Dashboard }
+                            onNavigateToDashboard = { currentScreen = Screen.Dashboard },
+                            onNavigateToLogs = { currentScreen = Screen.TelemetryLogs }
                         )
                         is Screen.Settings -> key(watchSettingsState.value) {
                             SettingsScreen(
@@ -100,17 +102,18 @@ class MainActivity : ComponentActivity(),
                             )
                         }
                         is Screen.Dashboard -> {
-                            // Ephemeral Dashboard Start/Stop handled by lifecycle
                             DisposableEffect(Unit) {
                                 sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_START)
                                 onDispose { sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_STOP) }
                             }
-                            
                             DashboardScreen(
                                 telemetry = telemetryState.value,
                                 onResetPeak = { sendRemoteCommand(ProtocolContract.Paths.RESET_PEAKS) },
                                 onClose = { currentScreen = Screen.Main }
                             )
+                        }
+                        is Screen.TelemetryLogs -> {
+                            TelemetryLogScreen(onClose = { currentScreen = Screen.Main })
                         }
                     }
                 }
@@ -259,13 +262,13 @@ class MainActivity : ComponentActivity(),
 }
 
 @Composable
-fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, inferenceState: VehicleInferenceState, sensorStates: SnapshotStateMap<String, SensorStatus>, onCommand: (String) -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDashboard: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
+fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, inferenceState: VehicleInferenceState, sensorStates: SnapshotStateMap<String, SensorStatus>, onCommand: (String) -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDashboard: () -> Unit, onNavigateToLogs: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("WATCH² OUT", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
             StatusBadge(isConnected)
         }
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf("A", "G", "P", "R").forEach { key ->
                 val status = sensorStates[key] ?: SensorStatus.UNKNOWN
                 val fullName = when(key) { "A" -> "ACCELEROMETER"; "G" -> "GYROSCOPE"; "P" -> "PRESSURE"; "R" -> "ROTATION"; else -> "UNKNOWN" }
@@ -273,15 +276,16 @@ fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, inferenceState:
             }
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Button(onClick = { onCommand(if (isWatchActive) ProtocolContract.Paths.STOP_MONITORING else ProtocolContract.Paths.START_MONITORING) }, enabled = isConnected, modifier = Modifier.size(220.dp), shape = CircleShape, colors = ButtonDefaults.buttonColors(containerColor = if (!isConnected) Color.DarkGray else if (isWatchActive) Color(0xFFD32F2F) else Color(0xFF388E3C)), elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)) {
+            Button(onClick = { onCommand(if (isWatchActive) ProtocolContract.Paths.STOP_MONITORING else ProtocolContract.Paths.START_MONITORING) }, enabled = isConnected, modifier = Modifier.size(200.dp), shape = CircleShape, colors = ButtonDefaults.buttonColors(containerColor = if (!isConnected) Color.DarkGray else if (isWatchActive) Color(0xFFD32F2F) else Color(0xFF388E3C)), elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(text = if (isWatchActive) "STOP" else "START", fontSize = 38.sp, fontWeight = FontWeight.Black)
+                    Text(text = if (isWatchActive) "STOP" else "START", fontSize = 34.sp, fontWeight = FontWeight.Black)
                     if (isConnected) Text(text = if (isWatchActive) inferenceState.name else "READY TO ARM", style = MaterialTheme.typography.labelLarge, color = Color.Yellow.copy(alpha = 0.9f))
                 }
             }
         }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             LargeNavButton(label = "DASHBOARD", icon = Icons.Default.Analytics, modifier = Modifier.weight(1f), enabled = isConnected, onClick = onNavigateToDashboard)
+            LargeNavButton(label = "HISTORY", icon = Icons.Default.History, modifier = Modifier.weight(1f), onClick = onNavigateToLogs)
             LargeNavButton(label = "SETTINGS", icon = Icons.Default.Settings, modifier = Modifier.weight(1f), enabled = isConnected, onClick = onNavigateToSettings)
         }
     }
@@ -306,10 +310,10 @@ fun FullSensorIndicator(name: String, status: SensorStatus) {
 
 @Composable
 fun LargeNavButton(label: String, icon: ImageVector, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Button(onClick = onClick, enabled = enabled, modifier = modifier.height(64.dp), shape = MaterialTheme.shapes.medium, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)) {
+    Button(onClick = onClick, enabled = enabled, modifier = modifier.height(56.dp), shape = MaterialTheme.shapes.medium, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant), contentPadding = PaddingValues(4.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
-            Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+            Text(label, fontSize = 9.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

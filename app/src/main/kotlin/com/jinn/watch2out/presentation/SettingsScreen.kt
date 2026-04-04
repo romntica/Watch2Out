@@ -18,9 +18,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jinn.watch2out.shared.model.SimulationDetectionMode
 import com.jinn.watch2out.shared.model.WatchSettings
-import com.jinn.watch2out.shared.network.ProtocolContract
 import java.util.Locale
+import kotlin.math.abs
 
+/**
+ * Advanced configuration for the Sentinel system.
+ * v27.4: Added Telemetry Logging toggle.
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
@@ -31,35 +35,81 @@ fun SettingsScreen(
     onSimulatePreset: (String) -> Unit,
     onInjectCustomData: (Float, Float, Float, Float, Float, Float) -> Unit
 ) {
-    // 1. Sensor States
-    var isAccelEnabled by remember { mutableStateOf<Boolean>(currentSettings.isAccelEnabled) }
-    var accelThreshold by remember { mutableFloatStateOf(currentSettings.accelThresholdG) }
-    var isGyroEnabled by remember { mutableStateOf<Boolean>(currentSettings.isGyroEnabled) }
-    var gyroThreshold by remember { mutableFloatStateOf(currentSettings.gyroThresholdDeg) }
-    var isPressureEnabled by remember { mutableStateOf<Boolean>(currentSettings.isPressureEnabled) }
-    var pressureThreshold by remember { mutableFloatStateOf(currentSettings.pressureThresholdHpa) }
+    val scrollState = rememberScrollState()
+    
+    // 1. Core Sensor Thresholds
+    var accelThreshold: Float by remember { mutableFloatStateOf(currentSettings.accelThresholdG) }
+    var gyroThreshold: Float by remember { mutableFloatStateOf(currentSettings.gyroThresholdDeg) }
+    var pressureThreshold: Float by remember { mutableFloatStateOf(currentSettings.pressureThresholdHpa) }
+    var crashScoreThreshold: Float by remember { mutableFloatStateOf(currentSettings.crashScoreThreshold) }
 
-    // 2. Buffer, Interval & Simulation
-    var bufferTime by remember { mutableIntStateOf(currentSettings.bufferSeconds) }
-    var samplingRateMs by remember { mutableIntStateOf(currentSettings.samplingRateMs) }
-    var simulationMode by remember { mutableStateOf<Boolean>(currentSettings.isSimulationMode) }
-    var forcedMode by remember { mutableStateOf<SimulationDetectionMode>(currentSettings.forcedDetectionMode) }
+    // 2. CrashScore v27 Tuning
+    var accelMinG: Float by remember { mutableFloatStateOf(currentSettings.accelMinG) }
+    var accelMaxG: Float by remember { mutableFloatStateOf(currentSettings.accelMaxG) }
+    var speedMinKmh: Float by remember { mutableFloatStateOf(currentSettings.speedMinKmh) }
+    var speedDeltaMaxKmh: Float by remember { mutableFloatStateOf(currentSettings.speedDeltaMaxKmh) }
+    var gyroMaxDegPerSec: Float by remember { mutableFloatStateOf(currentSettings.gyroMaxDegPerSec) }
+    var pressureMaxHpa: Float by remember { mutableFloatStateOf(currentSettings.pressureMaxHpa) }
+    var stillMaxSec: Float by remember { mutableFloatStateOf(currentSettings.stillMaxSec) }
 
-    // 3. Custom Injection State
-    var rawAccelX by remember { mutableStateOf("0.0") }
-    var rawAccelY by remember { mutableStateOf("0.0") }
-    var rawAccelZ by remember { mutableStateOf("9.8") }
-    var rawGyroX by remember { mutableStateOf("0.0") }
-    var rawSpeed by remember { mutableStateOf("20.0") }
-    var rawPressure by remember { mutableStateOf("1013.25") }
+    // 3. Weights
+    var wAccel: Float by remember { mutableFloatStateOf(currentSettings.wAccel) }
+    var wSpeed: Float by remember { mutableFloatStateOf(currentSettings.wSpeed) }
+    var wGyro: Float by remember { mutableFloatStateOf(currentSettings.wGyro) }
+    var wPress: Float by remember { mutableFloatStateOf(currentSettings.wPress) }
+    var wStill: Float by remember { mutableFloatStateOf(currentSettings.wStill) }
+    var wRoll: Float by remember { mutableFloatStateOf(currentSettings.wRoll) }
 
-    // 4. Other States
-    var isSmsEnabled by remember { mutableStateOf<Boolean>(currentSettings.isSmsEnabled) }
-    var smsRecipient by remember { mutableStateOf(currentSettings.smsRecipient) }
-    var isCallEnabled by remember { mutableStateOf<Boolean>(currentSettings.isCallEnabled) }
-    var callRecipient by remember { mutableStateOf(currentSettings.callRecipient) }
-    var useWatchDirectDispatch by remember { mutableStateOf<Boolean>(currentSettings.useWatchDirectDispatch) }
-    var isAutoStartEnabled by remember { mutableStateOf<Boolean>(currentSettings.isAutoStartEnabled) }
+    // 4. System & Simulation
+    var bufferTime: Int by remember { mutableIntStateOf(currentSettings.bufferSeconds) }
+    var samplingRateMs: Int by remember { mutableIntStateOf(currentSettings.samplingRateMs) }
+    var simulationMode: Boolean by remember { mutableStateOf(currentSettings.isSimulationMode) }
+    var forcedMode: SimulationDetectionMode by remember { mutableStateOf(currentSettings.forcedDetectionMode) }
+    var isTelemetryLoggingEnabled: Boolean by remember { mutableStateOf(currentSettings.isTelemetryLoggingEnabled) }
+
+    // 5. Emergency
+    var isSmsEnabled: Boolean by remember { mutableStateOf(currentSettings.isSmsEnabled) }
+    var smsRecipient: String by remember { mutableStateOf(currentSettings.smsRecipient) }
+    var isCallEnabled: Boolean by remember { mutableStateOf(currentSettings.isCallEnabled) }
+    var callRecipient: String by remember { mutableStateOf(currentSettings.callRecipient) }
+    var useWatchDirectDispatch: Boolean by remember { mutableStateOf(currentSettings.useWatchDirectDispatch) }
+    var isAutoStartEnabled: Boolean by remember { mutableStateOf(currentSettings.isAutoStartEnabled) }
+
+    // Custom Injection State
+    var rawAccelX: String by remember { mutableStateOf("0.0") }
+    var rawAccelY: String by remember { mutableStateOf("0.0") }
+    var rawAccelZ: String by remember { mutableStateOf("9.8") }
+    var rawGyroX: String by remember { mutableStateOf("0.0") }
+    var rawSpeed: String by remember { mutableStateOf("20.0") }
+    var rawPressure: String by remember { mutableStateOf("1013.25") }
+
+    fun applySensitivityPreset(preset: String) {
+        when (preset) {
+            "Conservative" -> {
+                accelThreshold = 15f; gyroThreshold = 300f; pressureThreshold = 3.5f; crashScoreThreshold = 0.85f
+            }
+            "Standard" -> {
+                accelThreshold = 10f; gyroThreshold = 200f; pressureThreshold = 2.5f; crashScoreThreshold = 0.70f
+            }
+            "Aggressive" -> {
+                accelThreshold = 7f; gyroThreshold = 150f; pressureThreshold = 1.5f; crashScoreThreshold = 0.55f
+            }
+        }
+    }
+
+    fun applyWeightPreset(preset: String) {
+        when (preset) {
+            "Balanced" -> {
+                wAccel = 0.30f; wSpeed = 0.25f; wGyro = 0.15f; wPress = 0.10f; wStill = 0.15f; wRoll = 0.05f
+            }
+            "Highway" -> {
+                wAccel = 0.40f; wSpeed = 0.35f; wGyro = 0.05f; wPress = 0.05f; wStill = 0.10f; wRoll = 0.05f
+            }
+            "Technical" -> {
+                wAccel = 0.20f; wSpeed = 0.10f; wGyro = 0.30f; wPress = 0.10f; wStill = 0.10f; wRoll = 0.20f
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -75,35 +125,69 @@ fun SettingsScreen(
         }
     ) { padding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
+            modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(scrollState).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            // --- 1. Hardware Sensors ---
-            SettingsSection(title = "Hardware Sensors", enabled = isConnected) {
-                ThresholdControl("Accelerometer", accelThreshold, "G", isAccelEnabled, { isAccelEnabled = it }, { accelThreshold = it }, 5f..30f, isConnected)
-                ThresholdControl("Gyroscope", gyroThreshold, "°/s", isGyroEnabled, { isGyroEnabled = it }, { gyroThreshold = it }, 100f..1000f, isConnected)
-                ThresholdControl("Barometer", pressureThreshold, "hPa", isPressureEnabled, { isPressureEnabled = it }, { pressureThreshold = it }, 0.5f..5.0f, isConnected)
+            // --- 0. Sensitivity Presets ---
+            SettingsSection(title = "Sensitivity Presets", enabled = isConnected) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PresetButton("Conservative", Modifier.weight(1f)) { applySensitivityPreset("Conservative") }
+                    PresetButton("Standard", Modifier.weight(1f)) { applySensitivityPreset("Standard") }
+                    PresetButton("Aggressive", Modifier.weight(1f)) { applySensitivityPreset("Aggressive") }
+                }
+                Text("Changes basic trigger thresholds.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
             }
 
-            // --- 2. System & Policy ---
+            // --- 1. Core Detection ---
+            SettingsSection(title = "Core Detection", enabled = isConnected) {
+                ThresholdControl("Incident Threshold", crashScoreThreshold, "", { crashScoreThreshold = it }, 0.5f..0.95f, isConnected)
+                ThresholdControl("Accel Threshold (G)", accelThreshold, "G", { accelThreshold = it }, 5f..30f, isConnected)
+                ThresholdControl("Gyro Threshold", gyroThreshold, "°/s", { gyroThreshold = it }, 100f..1000f, isConnected)
+                ThresholdControl("Baro Threshold", pressureThreshold, "hPa", { pressureThreshold = it }, 0.5f..5.0f, isConnected)
+            }
+
+            // --- 2. Feature Weights ---
+            SettingsSection(title = "Feature Weights (Total ≈ 1.0)", enabled = isConnected) {
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PresetButton("Balanced", Modifier.weight(1f)) { applyWeightPreset("Balanced") }
+                    PresetButton("Highway", Modifier.weight(1f)) { applyWeightPreset("Highway") }
+                    PresetButton("Technical", Modifier.weight(1f)) { applyWeightPreset("Technical") }
+                }
+                
+                ThresholdControl("Weight: Accel", wAccel, "", { wAccel = it }, 0f..1f, isConnected)
+                ThresholdControl("Weight: Speed", wSpeed, "", { wSpeed = it }, 0f..1f, isConnected)
+                ThresholdControl("Weight: Gyro", wGyro, "", { wGyro = it }, 0f..1f, isConnected)
+                ThresholdControl("Weight: Press", wPress, "", { wPress = it }, 0f..1f, isConnected)
+                ThresholdControl("Weight: Still", wStill, "", { wStill = it }, 0f..1f, isConnected)
+                ThresholdControl("Weight: Roll", wRoll, "", { wRoll = it }, 0f..1f, isConnected)
+                
+                val currentSum: Float = wAccel + wSpeed + wGyro + wPress + wStill + wRoll
+                Text(
+                    text = String.format(Locale.US, "Current Sum: %.2f", currentSum),
+                    color = if (abs(currentSum - 1.0f) < 0.05f) Color.Green else Color.Red,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            // --- 3. CrashScore v27 Tuning ---
+            SettingsSection(title = "Advanced Tuning", enabled = isConnected) {
+                Text("Range Normalization", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
+                ThresholdControl("Accel Min G", accelMinG, "G", { accelMinG = it }, 1f..10f, isConnected)
+                ThresholdControl("Accel Max G", accelMaxG, "G", { accelMaxG = it }, 10f..30f, isConnected)
+                ThresholdControl("Speed Min Kmh", speedMinKmh, "km/h", { speedMinKmh = it }, 0f..40f, isConnected)
+                ThresholdControl("Speed Delta Max", speedDeltaMaxKmh, "km/h", { speedDeltaMaxKmh = it }, 10f..100f, isConnected)
+                ThresholdControl("Gyro Max", gyroMaxDegPerSec, "°/s", { gyroMaxDegPerSec = it }, 200f..1000f, isConnected)
+                ThresholdControl("Still Max", stillMaxSec, "s", { stillMaxSec = it }, 5f..30f, isConnected)
+            }
+
+            // --- 4. System & Policy ---
             SettingsSection(title = "System & Policy", enabled = isConnected) {
-                SwitchPreference(
-                    "Auto Start on Boot", 
-                    "Automatically start monitoring when the watch turns on", 
-                    isAutoStartEnabled, 
-                    { isAutoStartEnabled = it }, 
-                    isConnected
-                )
-                SwitchPreference(
-                    "Watch Direct Dispatch", 
-                    "Watch will try to send SMS directly (requires LTE/Cellular)", 
-                    useWatchDirectDispatch, 
-                    { useWatchDirectDispatch = it }, 
-                    isConnected
-                )
+                SwitchPreference("Auto Start on Boot", "Automatically start monitoring on boot", isAutoStartEnabled, { isAutoStartEnabled = it }, isConnected)
+                SwitchPreference("Watch Direct Dispatch", "Watch sends SMS directly", useWatchDirectDispatch, { useWatchDirectDispatch = it }, isConnected)
+                SwitchPreference("Telemetry Logging", "Periodically log sensing values for review", isTelemetryLoggingEnabled, { isTelemetryLoggingEnabled = it }, isConnected)
             }
 
-            // --- 3. Developer Simulation ---
+            // --- 5. Developer Simulation ---
             SettingsSection(title = "Developer Simulation", enabled = isConnected) {
                 SwitchPreference("Enable Simulation Mode", "Allows manual data injection", simulationMode, { simulationMode = it }, isConnected)
                 
@@ -144,12 +228,12 @@ fun SettingsScreen(
 
                     Button(
                         onClick = {
-                            val ax = rawAccelX.toFloatOrNull() ?: 0f
-                            val ay = rawAccelY.toFloatOrNull() ?: 0f
-                            val az = rawAccelZ.toFloatOrNull() ?: 9.8f
-                            val gx = rawGyroX.toFloatOrNull() ?: 0f
-                            val sp = rawSpeed.toFloatOrNull() ?: 0f
-                            val pr = rawPressure.toFloatOrNull() ?: 1013.25f
+                            val ax: Float = rawAccelX.toFloatOrNull() ?: 0f
+                            val ay: Float = rawAccelY.toFloatOrNull() ?: 0f
+                            val az: Float = rawAccelZ.toFloatOrNull() ?: 9.8f
+                            val gx: Float = rawGyroX.toFloatOrNull() ?: 0f
+                            val sp: Float = rawSpeed.toFloatOrNull() ?: 0f
+                            val pr: Float = rawPressure.toFloatOrNull() ?: 1013.25f
                             onInjectCustomData(ax, ay, az, gx, sp, pr)
                         },
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -160,7 +244,7 @@ fun SettingsScreen(
                 }
             }
 
-            // --- 4. Emergency Contacts ---
+            // --- 6. Emergency Contacts ---
             SettingsSection(title = "Emergency Contacts", enabled = isConnected) {
                 ContactField("SMS Phone", isSmsEnabled, smsRecipient, { isSmsEnabled = it }, { smsRecipient = it }, KeyboardType.Phone, isConnected)
                 ContactField("Emergency Call", isCallEnabled, callRecipient, { isCallEnabled = it }, { callRecipient = it }, KeyboardType.Phone, isConnected)
@@ -172,11 +256,22 @@ fun SettingsScreen(
                 Button(
                     onClick = {
                         onApply(WatchSettings(
-                            isAccelEnabled = isAccelEnabled, accelThresholdG = accelThreshold,
-                            isGyroEnabled = isGyroEnabled, gyroThresholdDeg = gyroThreshold,
-                            isPressureEnabled = isPressureEnabled, pressureThresholdHpa = pressureThreshold,
+                            accelThresholdG = accelThreshold,
+                            gyroThresholdDeg = gyroThreshold,
+                            pressureThresholdHpa = pressureThreshold,
+                            crashScoreThreshold = crashScoreThreshold,
+                            
+                            accelMinG = accelMinG, accelMaxG = accelMaxG,
+                            speedMinKmh = speedMinKmh, speedDeltaMaxKmh = speedDeltaMaxKmh,
+                            gyroMaxDegPerSec = gyroMaxDegPerSec, pressureMaxHpa = pressureMaxHpa,
+                            stillMaxSec = stillMaxSec,
+                            
+                            wAccel = wAccel, wSpeed = wSpeed, wGyro = wGyro,
+                            wPress = wPress, wStill = wStill, wRoll = wRoll,
+
                             bufferSeconds = bufferTime, samplingRateMs = samplingRateMs,
                             isSimulationMode = simulationMode, forcedDetectionMode = forcedMode,
+                            isTelemetryLoggingEnabled = isTelemetryLoggingEnabled,
                             isAutoStartEnabled = isAutoStartEnabled,
                             useWatchDirectDispatch = useWatchDirectDispatch,
                             isSmsEnabled = isSmsEnabled, smsRecipient = smsRecipient,
@@ -191,8 +286,8 @@ fun SettingsScreen(
 }
 
 @Composable
-fun PresetButton(label: String, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, modifier = Modifier.height(32.dp)) {
+fun PresetButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    FilledTonalButton(onClick = onClick, modifier = modifier.height(32.dp)) {
         Text(label, fontSize = 10.sp)
     }
 }
@@ -216,13 +311,10 @@ fun SettingsSection(title: String, enabled: Boolean, content: @Composable Column
 }
 
 @Composable
-fun ThresholdControl(label: String, value: Float, unit: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit, onValueChange: (Float) -> Unit, valueRange: ClosedFloatingPointRange<Float>, enabled: Boolean) {
+fun ThresholdControl(label: String, value: Float, unit: String, onValueChange: (Float) -> Unit, valueRange: ClosedFloatingPointRange<Float>, enabled: Boolean) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
-            Text("$label: ${String.format(Locale.getDefault(), "%.1f", value)}$unit", style = MaterialTheme.typography.bodyLarge)
-        }
-        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, enabled = enabled && checked, modifier = Modifier.padding(horizontal = 12.dp))
+        Text("$label: ${String.format(Locale.getDefault(), "%.2f", value)}$unit", style = MaterialTheme.typography.bodyLarge)
+        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, enabled = enabled, modifier = Modifier.padding(horizontal = 12.dp))
     }
 }
 
