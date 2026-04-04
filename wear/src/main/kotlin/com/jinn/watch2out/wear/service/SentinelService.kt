@@ -103,8 +103,14 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
         encodeDefaults = true 
     }
 
-    private var dynamicRateMs: Int = 400
+    private var dynamicRateMs: Int = 450
     private var lastRateChangeTime: Long = 0L
+    
+    // Phase 3: GPS Fusion
+    private var lastHeartbeat: Heartbeat? = null
+    private var gpsGracePeriodStart: Long = 0L
+    var currentGpsMode = GpsMode.WATCH_ONLY
+        private set
 
     private var baselinePressure: Float = 0f
     private var totalRotation: Float = 0f
@@ -271,6 +277,10 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
                 val currentImpact: Float = magnitude(floatArrayOf(snapshot[0], snapshot[1], snapshot[2])) / G_EARTH
                 val scoringResult: CrashScoreCalculator.Result = calculateCrashScoreResult(currentImpact, maxDeltaV, totalRotation, snapshot)
                 val currentCrashScore: Float = scoringResult.finalScore
+                
+                // 3s Grace Period (Phase 3 GPS Fusion)
+                val inGrace = System.currentTimeMillis() - gpsGracePeriodStart < 3000L
+                val activeMode = if (inGrace) GpsMode.PHONE_PRIMARY else currentGpsMode
                 
                 val currentGyroMagnitude: Float = magnitude(floatArrayOf(snapshot[3], snapshot[4], snapshot[5]))
                 val currentGyroRatio: Float = (currentGyroMagnitude / GYRO_NORMALIZER).coerceIn(0f, 10f)
@@ -490,16 +500,78 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
 
     private fun updateMonitoringRate(nowMs: Long) {
         val speedKmh: Float = currentGpsSpeed * MPS_TO_KMH
-        val targetRate: Int = when {
-            vInferenceState != VehicleInferenceState.IDLE && vInferenceState != VehicleInferenceState.MOVING -> 100
-            speedKmh >= currentSettings.highSpeedThresholdKmh -> 50
-            speedKmh >= currentSettings.normalSpeedThresholdKmh -> 100
-            speedKmh >= currentSettings.lowSpeedThresholdKmh -> 200
-            else -> 400
+        
+        // 1. Determine Target Rate (Phase 3 GPS Fusion)
+        val targetRate: Int = if (vInferenceState != VehicleInferenceState.IDLE && vInferenceState != VehicleInferenceState.MOVING) {
+            100 // High-Res during incident
+        } else {
+            val hb = lastHeartbeat
+            // v27.7.2: ONLY use phone speed zone if explicitly marked as reliable (Strict <25m, <2s)
+            if (hb != null && hb.isSpeedHintReliable && hb.speedZone != null) {
+                hb.getAdaptiveIntervalMs().toInt()
+            } else {
+                // Fallback to Watch Speed Zone (Independent Mode)
+                when {
+                    speedKmh >= 82f -> 75
+                    speedKmh >= 32f -> 150
+                    speedKmh >= 12f -> 200
+                    else -> 450
+                }
+            }
         }
+
         if (targetRate != dynamicRateMs && (nowMs - lastRateChangeTime > RATE_CHANGE_COOLDOWN_MS)) {
+            Log.d(TAG, "Changing sampling rate: $dynamicRateMs -> $targetRate ms (Speed: $speedKmh km/h, Mode: $currentGpsMode)")
             dynamicRateMs = targetRate; lastRateChangeTime = nowMs
             if (_currentState.value == IncidentState.MONITORING || isDashboardActive) registerSensors()
+        }
+    }
+
+    private fun handleHeartbeat(hb: Heartbeat) {
+        val prevMode = currentGpsMode
+        val now = System.currentTimeMillis()
+        lastHeartbeat = hb
+        
+        // 1. UI Status Update (with 5s Hysteresis)
+        if (hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE) {
+            lastGpsUpdateTime = now
+        }
+        val isPhoneGpsAvailableForUi = hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE || (now - lastGpsUpdateTime < 5000)
+
+        // 2. Control Logic Update (Strict Reliability - No Hysteresis)
+        // AGENTS.md Rule 5: Only switch to PHONE_PRIMARY if the hint is strictly reliable (<25m, <2s)
+        currentGpsMode = if (hb.isSpeedHintReliable && hb.speedZone != null) {
+            GpsMode.PHONE_PRIMARY
+        } else {
+            GpsMode.WATCH_ONLY
+        }
+
+        Log.d(TAG, "FUSION_DEBUG: hb_status=${hb.phoneGpsStatus}, hint_reliable=${hb.isSpeedHintReliable}, mode=$currentGpsMode")
+
+        // Update the local telemetry state
+        _telemetry.update { current ->
+            val watchActive = lastLocation != null && (now - (lastLocation?.time ?: 0) < 15000)
+            val phoneActive = isPhoneGpsAvailableForUi
+            
+            current.copy(
+                isGpsActive = watchActive || phoneActive,
+                isWatchGpsActive = watchActive,
+                isPhoneGpsActive = phoneActive,
+                phoneGpsAccuracy = if (hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE) hb.phoneGpsAccuracy else (if (phoneActive) current.phoneGpsAccuracy else 0f),
+                watchGpsAccuracy = if (watchActive) lastLocation?.accuracy ?: 0f else 0f,
+                activeGpsSource = currentGpsMode,
+                lastUpdateTime = now
+            )
+        }
+
+        if (prevMode == GpsMode.PHONE_PRIMARY && currentGpsMode == GpsMode.WATCH_ONLY) {
+            Log.w(TAG, "FUSION_DEBUG: Phone GPS officially lost after grace period.")
+        }
+
+        if (prevMode != currentGpsMode) {
+            Log.i(TAG, "FUSION_DEBUG: GPS Mode Change: $prevMode -> $currentGpsMode")
+            manageWatchGpsHardware() // Toggle Watch GPS hardware for battery saving
+            broadcastStatusToMobile(_telemetry.value)
         }
     }
 
@@ -652,20 +724,49 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
                 dismissIncidentInternal()
                 broadcastStatusToMobile(_telemetry.value)
             }
+            ACTION_UPDATE_HEARTBEAT -> {
+                val json = intent.getStringExtra("heartbeat_json")
+                if (json != null) {
+                    try {
+                        val hb = explicitJson.decodeFromString<Heartbeat>(json)
+                        handleHeartbeat(hb)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Heartbeat parse failed: ${e.message}")
+                    }
+                }
+            }
             ACTION_FINAL_DISPATCH -> setVInferenceState(VehicleInferenceState.CONFIRMED_CRASH)
         }
         return START_STICKY
     }
 
     @SuppressLint("MissingPermission")
+    private fun manageWatchGpsHardware() {
+        val shouldBeRunning = _currentState.value == IncidentState.MONITORING || isDashboardActive
+        val useWatchGps = currentGpsMode == GpsMode.WATCH_ONLY
+        
+        Handler(Looper.getMainLooper()).post {
+            try {
+                if (shouldBeRunning && useWatchGps) {
+                    if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        Log.d(TAG, "FUSION: Starting Watch GPS Hardware")
+                        locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
+                        locationManager?.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, this)
+                    }
+                } else {
+                    Log.d(TAG, "FUSION: Suspending Watch GPS Hardware (Mode=$currentGpsMode, Running=$shouldBeRunning)")
+                    locationManager?.removeUpdates(this)
+                }
+            } catch (e: Exception) { Log.e(TAG, "FUSION: GPS Hardware Toggle Failed", e) }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     private fun registerSensors() { 
         unregisterSensors()
+        manageWatchGpsHardware()
         Handler(Looper.getMainLooper()).post {
             try { 
-                if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                    locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
-                    locationManager?.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, this)
-                }
                 val rateUs: Int = (dynamicRateMs * 1000).coerceAtLeast(10000)
                 sensorManager?.let { sm ->
                     sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(this, it, rateUs) }
@@ -677,11 +778,21 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
         }
     }
     
-    private fun unregisterSensors() { sensorManager?.unregisterListener(this); locationManager?.removeUpdates(this) }
+    private fun unregisterSensors() { 
+        sensorManager?.unregisterListener(this)
+        locationManager?.removeUpdates(this) 
+    }
     
     override fun onSensorChanged(event: SensorEvent?) {
         val ev: SensorEvent = event ?: return
         if (isSimulatingLocked) return
+        
+        val now = System.currentTimeMillis()
+        if (isDashboardActive && now - lastStreamTime > 100) {
+            lastStreamTime = now
+            broadcastStatusToMobile(_telemetry.value)
+        }
+
         synchronized(currentReading) {
             when (ev.sensor.type) {
                 Sensor.TYPE_ACCELEROMETER -> { currentReading[0] = ev.values[0]; currentReading[1] = ev.values[1]; currentReading[2] = ev.values[2] }
@@ -755,20 +866,32 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
     private fun createForegroundNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("Watch2Out Active").setSmallIcon(android.R.drawable.ic_menu_mylocation).setOngoing(true).build()
 
     private fun broadcastStatusToMobile(telemetry: TelemetryState) {
+        val now = System.currentTimeMillis()
+        
+        // USE PERSISTED STATE from the latest _telemetry update to ensure consistency
+        val currentSnapshot = _telemetry.value.copy(lastUpdateTime = now)
+
+        // 1. Update LOCAL StateFlow to ensure consistent UI across all components
+        _telemetry.value = currentSnapshot
+
+        // 2. Broadcast to Mobile
         val request: PutDataRequest = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
             dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, _currentState.value == IncidentState.MONITORING)
             dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, if (hasAccel) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
             dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, if (hasGyro) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
             dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, if (hasBaro) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
             dataMap.putString(ProtocolContract.Keys.ROT_STATUS, if (hasGyro) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
-            dataMap.putString(ProtocolContract.Keys.LOC_STATUS, if (hasGps) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
-            dataMap.putString(ProtocolContract.Keys.MIC_STATUS, if (hasMic) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
-            dataMap.putString(ProtocolContract.Keys.SMS_STATUS, if (hasSms) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
-            dataMap.putString(ProtocolContract.Keys.CALL_STATUS, if (hasVoice) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name)
-            try { dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, explicitJson.encodeToString(TelemetryState.serializer(), telemetry)) } catch(e: Exception) {}
-            dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+            dataMap.putString(ProtocolContract.Keys.LOC_STATUS, currentGpsMode.name)
+            
+            try { 
+                dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, explicitJson.encodeToString(TelemetryState.serializer(), currentSnapshot))
+            } catch(e: Exception) {
+                Log.e(TAG, "FUSION_DEBUG: Telemetry JSON encoding failed", e)
+            }
+            dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, now)
         }.asPutDataRequest().setUrgent()
-         Wearable.getDataClient(this).putDataItem(request)
+        
+        Wearable.getDataClient(this).putDataItem(request)
     }
 
     private suspend fun handleSettingsChange(s: WatchSettings) { 
@@ -807,6 +930,7 @@ class SentinelService : Service(), SensorEventListener, LocationListener {
         const val ACTION_SIMULATE: String = "ACTION_SIMULATE"
         const val ACTION_INJECT_DATA: String = "ACTION_INJECT_DATA"
         const val ACTION_DISMISS_INCIDENT: String = "ACTION_DISMISS_INCIDENT"
+        const val ACTION_UPDATE_HEARTBEAT: String = "ACTION_UPDATE_HEARTBEAT"
         const val ACTION_FINAL_DISPATCH: String = "ACTION_FINAL_DISPATCH"
         const val ACTION_DISMISS_ALERT: String = "com.jinn.watch2out.DISMISS_ALERT"
         

@@ -61,6 +61,7 @@ dependencies {
     
     // Wearable communication
     implementation(libs.play.services.wearable)
+    implementation("com.google.android.gms:play-services-location:21.3.0")
     
     // Utils
     implementation(libs.kotlinx.serialization.json)

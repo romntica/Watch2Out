@@ -2,8 +2,10 @@
 package com.jinn.watch2out.wear.presentation
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -16,6 +18,7 @@ import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.foundation.lazy.AutoCenteringParams
 import androidx.wear.compose.material.*
+import com.jinn.watch2out.shared.model.GpsMode
 import com.jinn.watch2out.shared.model.TelemetryState
 import com.jinn.watch2out.shared.model.VehicleInferenceState
 import java.util.Locale
@@ -111,15 +114,33 @@ fun DashboardScreen(
             }
         }
 
-        // 5. STATUS (Confidence & GPS)
+        // 5. GPS FUSION (v27.7)
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                GpsStatusMiniBox(
+                    label = "WATCH",
+                    isActive = telemetry.isWatchGpsActive,
+                    isPrimary = telemetry.activeGpsSource == GpsMode.WATCH_ONLY,
+                    accuracy = telemetry.watchGpsAccuracy,
+                    modifier = Modifier.weight(1f)
+                )
+                GpsStatusMiniBox(
+                    label = "PHONE",
+                    isActive = telemetry.isPhoneGpsActive,
+                    isPrimary = telemetry.activeGpsSource == GpsMode.PHONE_PRIMARY,
+                    accuracy = telemetry.phoneGpsAccuracy,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        // 6. SYSTEM STATUS
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SmallMetric("CONF", String.format(Locale.getDefault(), "%.0f%%", telemetry.sensorConfidence * 100f))
-                SmallMetric(
-                    label = "GPS",
-                    value = if (telemetry.isGpsActive) "LIVE" else "WAIT",
-                    valueColor = if (telemetry.isGpsActive) Color.Green else Color.Yellow
-                )
             }
         }
 
@@ -135,6 +156,33 @@ fun DashboardScreen(
             }
         }
         item { Spacer(modifier = Modifier.height(20.dp)) }
+    }
+}
+
+@Composable
+private fun GpsStatusMiniBox(label: String, isActive: Boolean, isPrimary: Boolean, accuracy: Float, modifier: Modifier = Modifier) {
+    val borderColor = if (isPrimary) Color(0xFF42A5F5) else if (isActive) Color(0xFF4CAF50) else Color.DarkGray
+    val bgColor = if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.15f) else Color.Transparent
+    
+    Column(
+        modifier = modifier
+            .border(1.dp, borderColor, RoundedCornerShape(4.dp))
+            .background(bgColor, RoundedCornerShape(4.dp))
+            .padding(4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(label, fontSize = 7.sp, color = if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.size(4.dp).background(if (isActive) Color.Green else Color.Red, CircleShape))
+            Spacer(Modifier.width(2.dp))
+            Text(
+                text = if (isActive) "${accuracy.toInt()}m" else "OFF",
+                fontSize = 9.sp,
+                color = if (isActive) Color.White else Color.Gray,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace
+            )
+        }
     }
 }
 

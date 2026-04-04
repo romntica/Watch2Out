@@ -4,6 +4,7 @@ package com.jinn.watch2out.wear.service
 import android.content.Intent
 import android.util.Log
 import com.google.android.gms.wearable.*
+import com.jinn.watch2out.shared.model.Heartbeat
 import com.jinn.watch2out.shared.model.WatchSettings
 import com.jinn.watch2out.shared.network.ProtocolContract
 import com.jinn.watch2out.wear.data.SettingsRepository
@@ -30,15 +31,31 @@ class WatchMessageService : WearableListenerService() {
 
     override fun onDataChanged(dataEvents: DataEventBuffer) {
         dataEvents.forEach { event ->
-            if (event.type == DataEvent.TYPE_CHANGED && event.dataItem.uri.path == ProtocolContract.Paths.SETTINGS_SYNC) {
-                val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
-                val json = dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON)
-                if (json != null) {
-                    serviceScope.launch {
-                        try {
-                            val newSettings = Json.decodeFromString<WatchSettings>(json)
-                            settingsRepository.updateSettings(newSettings)
-                        } catch (e: Exception) { }
+            val path = event.dataItem.uri.path ?: return@forEach
+            if (event.type == DataEvent.TYPE_CHANGED) {
+                when (path) {
+                    ProtocolContract.Paths.SETTINGS_SYNC -> {
+                        val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
+                        val json = dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON)
+                        if (json != null) {
+                            serviceScope.launch {
+                                try {
+                                    val newSettings = Json.decodeFromString<WatchSettings>(json)
+                                    settingsRepository.updateSettings(newSettings)
+                                } catch (e: Exception) { }
+                            }
+                        }
+                    }
+                    ProtocolContract.Paths.HEARTBEAT_SYNC -> {
+                        val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
+                        val json = dataMap.getString(ProtocolContract.Keys.HEARTBEAT_JSON)
+                        if (json != null) {
+                            val intent = Intent(applicationContext, SentinelService::class.java).apply {
+                                action = SentinelService.ACTION_UPDATE_HEARTBEAT
+                                putExtra("heartbeat_json", json)
+                            }
+                            startService(intent)
+                        }
                     }
                 }
             }

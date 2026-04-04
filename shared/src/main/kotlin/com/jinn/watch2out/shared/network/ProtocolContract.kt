@@ -32,6 +32,7 @@ object ProtocolContract {
         // Data Synchronization
         const val SETTINGS_SYNC = "$BASE/sync/settings"
         const val STATUS_SYNC = "$BASE/sync/status"
+        const val HEARTBEAT_SYNC = "$BASE/sync/heartbeat"
         const val REQUEST_SETTINGS = "$BASE/sync/request_settings"
         
         // Incident Reporting
@@ -52,6 +53,7 @@ object ProtocolContract {
         const val TIMESTAMP = "timestamp"
         const val SETTINGS_JSON = "settings_json"
         const val TELEMETRY_JSON = "telemetry_json"
+        const val HEARTBEAT_JSON = "heartbeat_json"
         const val IS_ACTIVE = "is_active"
         const val ACCEL_STATUS = "accel_status"
         const val GYRO_STATUS = "gyro_status"

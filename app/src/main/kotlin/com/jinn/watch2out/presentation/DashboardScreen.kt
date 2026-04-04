@@ -30,6 +30,7 @@ import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
+import com.jinn.watch2out.shared.model.GpsMode
 import com.jinn.watch2out.shared.model.TelemetryState
 import java.text.SimpleDateFormat
 import java.util.*
@@ -230,15 +231,83 @@ fun LiveFeedCard(t: TelemetryState) {
                 }
                 MetricItem("GYRO", String.format(Locale.getDefault(), "%.1f", t.gyroRatio), Modifier.weight(1f))
             }
-            Row(modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 MetricItem("PRES", String.format(Locale.getDefault(), "%+.1fhPa", t.pressureDelta), Modifier.weight(1f))
                 MetricItem("ROLL", String.format(Locale.getDefault(), "%.0f\u00b0", t.rollSum), Modifier.weight(1f))
             }
-            Row(modifier = Modifier.fillMaxWidth()) {
-                MetricItem("CONF", String.format(Locale.getDefault(), "%.0f%%", t.sensorConfidence * 100f), Modifier.weight(1f))
-                MetricItem("GPS", if (t.isGpsActive) "ACTIVE" else "SEARCH", Modifier.weight(1f), valueColor = if (t.isGpsActive) Color.Green else Color.Yellow)
+            
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                // Confidence with small bar
+                Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Text("CONF: ", fontSize = 12.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
+                    val conf = (t.sensorConfidence * 100).toInt()
+                    Text("$conf%", fontSize = 12.sp, color = getConfidenceColor(t.sensorConfidence), fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.width(4.dp))
+                    Box(modifier = Modifier.width(30.dp).height(4.dp).background(Color.DarkGray, CircleShape)) {
+                        Box(modifier = Modifier.fillMaxWidth(t.sensorConfidence).fillMaxHeight().background(getConfidenceColor(t.sensorConfidence), CircleShape))
+                    }
+                }
+                MetricItem("GYRO", String.format(Locale.getDefault(), "%.1f", t.gyroRatio), Modifier.weight(1f))
+            }
+
+            HorizontalDivider(color = Color.DarkGray)
+            Text("GPS FUSION STATUS (v27.7)", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GpsStatusBox(
+                    label = "WATCH GPS",
+                    isActive = t.isWatchGpsActive,
+                    isPrimary = t.activeGpsSource == GpsMode.WATCH_ONLY,
+                    accuracy = t.watchGpsAccuracy,
+                    modifier = Modifier.weight(1f)
+                )
+                GpsStatusBox(
+                    label = "PHONE GPS",
+                    isActive = t.isPhoneGpsActive,
+                    isPrimary = t.activeGpsSource == GpsMode.PHONE_PRIMARY,
+                    accuracy = t.phoneGpsAccuracy,
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
+    }
+}
+
+@Composable
+fun GpsStatusBox(label: String, isActive: Boolean, isPrimary: Boolean, accuracy: Float, modifier: Modifier = Modifier) {
+    val borderColor = if (isPrimary) Color(0xFF42A5F5) else if (isActive) Color(0xFF4CAF50) else Color.DarkGray
+    val bgColor = if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.1f) else Color.Transparent
+    
+    Column(
+        modifier = modifier
+            .border(1.dp, borderColor, RoundedCornerShape(4.dp))
+            .background(bgColor, RoundedCornerShape(4.dp))
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(label, fontSize = 9.sp, color = if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.size(6.dp).background(if (isActive) Color.Green else Color.Red, CircleShape))
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = if (isActive) "±${accuracy.toInt()}m" else "OFFLINE",
+                fontSize = 12.sp,
+                color = if (isActive) Color.White else Color.Gray,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+        if (isPrimary) {
+            Text("PRIMARY SOURCE", fontSize = 7.sp, color = Color(0xFF42A5F5), fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+private fun getConfidenceColor(conf: Float): Color {
+    return when {
+        conf > 0.8f -> Color.Green
+        conf > 0.5f -> Color.Yellow
+        else -> Color.Red
     }
 }
 

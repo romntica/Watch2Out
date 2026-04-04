@@ -187,6 +187,7 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
                             val intent = Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_STOP_MONITORING }
                             context.startService(intent)
                         },
+                        gpsMode = service?.currentGpsMode ?: GpsMode.WATCH_ONLY,
                         onNavigateToSettings = { currentScreen = WearNavScreen.Settings },
                         onNavigateToDashboard = { currentScreen = WearNavScreen.Dashboard }
                     )
@@ -225,6 +226,7 @@ fun MainScreen(
     settings: WatchSettings,
     isMonitoring: Boolean,
     inferenceState: String,
+    gpsMode: GpsMode,
     onStartMonitoring: () -> Unit,
     onStopMonitoring: () -> Unit,
     onNavigateToSettings: () -> Unit,
@@ -260,19 +262,37 @@ fun MainScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 sensorStatuses.forEach { (label, status) -> SensorIndicator(label, status) }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(onClick = { if (isMonitoring) onStopMonitoring() else onStartMonitoring() }, modifier = Modifier.fillMaxWidth(0.85f).height(75.dp), colors = if (isMonitoring) ButtonDefaults.secondaryButtonColors() else ButtonDefaults.primaryButtonColors()) {
+            
+            if (isMonitoring) {
+                Spacer(modifier = Modifier.height(4.dp))
+                FusionBadge(gpsMode)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Button(onClick = { if (isMonitoring) onStopMonitoring() else onStartMonitoring() }, modifier = Modifier.fillMaxWidth(0.85f).height(65.dp), colors = if (isMonitoring) ButtonDefaults.secondaryButtonColors() else ButtonDefaults.primaryButtonColors()) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(text = if (isMonitoring) "STOP" else "START", style = MaterialTheme.typography.title1)
+                    Text(text = if (isMonitoring) "STOP" else "START", style = MaterialTheme.typography.title2)
                     if (isMonitoring) { Text(text = inferenceState, style = MaterialTheme.typography.caption3, color = Color.Yellow) }
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             Row(modifier = Modifier.fillMaxWidth(0.9f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onNavigateToDashboard, modifier = Modifier.weight(1f).height(50.dp)) { Text("DASH", style = MaterialTheme.typography.caption2) }
-                Button(onClick = { onNavigateToSettings() }, modifier = Modifier.weight(1f).height(50.dp)) { Text("SET", style = MaterialTheme.typography.caption2) }
+                Button(onClick = onNavigateToDashboard, modifier = Modifier.weight(1f).height(45.dp)) { Text("DASH", style = MaterialTheme.typography.caption2) }
+                Button(onClick = { onNavigateToSettings() }, modifier = Modifier.weight(1f).height(45.dp)) { Text("SET", style = MaterialTheme.typography.caption2) }
             }
         }
+    }
+}
+
+@Composable
+fun FusionBadge(mode: GpsMode) {
+    val isFusion = mode == GpsMode.PHONE_PRIMARY
+    val color = if (isFusion) Color(0xFF42A5F5) else Color(0xFFFFA726)
+    val text = if (isFusion) "FUSION (PHONE)" else "STANDALONE"
+    
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box(modifier = Modifier.size(6.dp).background(color, CircleShape))
+        Text(text = text, fontSize = 8.sp, color = color, fontWeight = FontWeight.Bold)
     }
 }
 

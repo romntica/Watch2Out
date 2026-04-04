@@ -45,7 +45,14 @@ data class TelemetryState(
     val gyroRatio: Float = 0f,
     val rollSum: Float = 0f,
     val sensorConfidence: Float = 1.0f,
-    val isGpsActive: Boolean = false,
+    
+    // Phase 4: Fusion GPS Details (v27.6)
+    val isGpsActive: Boolean = false,      // System-wide GPS status (Any source)
+    val isWatchGpsActive: Boolean = false, // Watch hardware status
+    val isPhoneGpsActive: Boolean = false, // Phone link status
+    val watchGpsAccuracy: Float = 0f,
+    val phoneGpsAccuracy: Float = 0f,
+    val activeGpsSource: GpsMode = GpsMode.WATCH_ONLY,
 
     // CrashScore v27 Debug & Tuning
     val bonusWeak: Float = 0f,

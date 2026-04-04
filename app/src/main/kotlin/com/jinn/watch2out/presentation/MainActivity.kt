@@ -1,12 +1,18 @@
 // [Module: :app]
 package com.jinn.watch2out.presentation
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
 import android.net.Uri
 import android.os.Bundle
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -18,14 +24,24 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationAvailability
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.wearable.*
 import com.jinn.watch2out.service.MobileAlertDispatcher
+import com.jinn.watch2out.service.PhoneGpsManager
 import com.jinn.watch2out.shared.model.*
 import com.jinn.watch2out.shared.network.ProtocolContract
 import kotlinx.coroutines.Dispatchers
@@ -48,30 +64,39 @@ class MainActivity : ComponentActivity(),
 
     private val isWatchActiveState = mutableStateOf(false)
     private val isConnectedState = mutableStateOf(false)
+    private val gpsModeState = mutableStateOf(GpsMode.WATCH_ONLY)
     
     private val sensorStates = mutableStateMapOf<String, SensorStatus>(
         "A" to SensorStatus.UNKNOWN,
         "G" to SensorStatus.UNKNOWN,
         "P" to SensorStatus.UNKNOWN,
-        "R" to SensorStatus.UNKNOWN
+        "R" to SensorStatus.UNKNOWN,
+        "L" to SensorStatus.UNKNOWN // Location Status
     )
     private val watchSettingsState = mutableStateOf(WatchSettings())
     private val telemetryState = mutableStateOf<TelemetryState>(TelemetryState())
     
     private lateinit var alertDispatcher: MobileAlertDispatcher
+    private lateinit var phoneGpsManager: PhoneGpsManager
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private var lastLocationAvailability: com.google.android.gms.location.LocationAvailability? = null
 
     private val explicitJson = Json {
         allowSpecialFloatingPointValues = true
         ignoreUnknownKeys = true
+        encodeDefaults = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         alertDispatcher = MobileAlertDispatcher(this)
+        phoneGpsManager = PhoneGpsManager(this)
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         
-        Wearable.getDataClient(this).addListener(this)
+        startLocationUpdates()
         Wearable.getCapabilityClient(this).addListener(this, Uri.parse("wear://"), CapabilityClient.FILTER_REACHABLE)
         Wearable.getMessageClient(this).addListener(this)
+        Wearable.getDataClient(this).addListener(this)
         
         checkConnectionStatus()
         handleIntent(intent)
@@ -86,6 +111,8 @@ class MainActivity : ComponentActivity(),
                             isConnected = isConnectedState.value,
                             inferenceState = telemetryState.value.vehicleInferenceState,
                             sensorStates = sensorStates,
+                            gpsMode = gpsModeState.value,
+                            telemetry = telemetryState.value,
                             onCommand = { cmd -> sendRemoteCommand(cmd) },
                             onNavigateToSettings = { requestWatchSettings(); currentScreen = Screen.Settings },
                             onNavigateToDashboard = { currentScreen = Screen.Dashboard },
@@ -137,6 +164,58 @@ class MainActivity : ComponentActivity(),
             val speed = intent.getFloatExtra("speed", 0f)
             
             triggerFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
+        }
+    }
+
+    private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+        if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true) startLocationUpdates()
+    }
+
+    private fun startLocationUpdates() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+            return
+        }
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L).build()
+        fusedLocationClient.requestLocationUpdates(request, object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                val location = result.lastLocation ?: return
+                syncHeartbeatToWatch(location)
+            }
+            override fun onLocationAvailability(availability: LocationAvailability) {
+                lastLocationAvailability = availability
+            }
+        }, Looper.getMainLooper())
+    }
+
+    private fun syncHeartbeatToWatch(location: Location) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val gpsResult = phoneGpsManager.checkStatus(location, lastLocationAvailability)
+                val speedZone = phoneGpsManager.calculateSpeedZone(location, gpsResult.isHintReliable)
+                
+                val heartbeat = Heartbeat(
+                    fsmState = telemetryState.value.vehicleInferenceState,
+                    crashScore = telemetryState.value.crashScore,
+                    batteryLevel = 0f, 
+                    phoneGpsStatus = gpsResult.status,
+                    phoneGpsAccuracy = location.accuracy,
+                    phoneSpeedKmh = location.speed * 3.6f,
+                    isSpeedHintReliable = gpsResult.isHintReliable,
+                    speedZone = speedZone
+                )
+
+                val nodes = Wearable.getNodeClient(this@MainActivity).connectedNodes.await()
+                val heartbeatJson = explicitJson.encodeToString(heartbeat)
+                
+                // Use DataClient for heartbeat sync to ensure all nodes receive it
+                val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.HEARTBEAT_SYNC).apply {
+                    dataMap.putString(ProtocolContract.Keys.HEARTBEAT_JSON, heartbeatJson)
+                    dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+                }.asPutDataRequest().setUrgent()
+                
+                Wearable.getDataClient(this@MainActivity).putDataItem(putDataReq).await()
+            } catch (e: Exception) { }
         }
     }
 
@@ -212,6 +291,9 @@ class MainActivity : ComponentActivity(),
                         sensorStates["G"] = parseStatus(dataMap.getString(ProtocolContract.Keys.GYRO_STATUS))
                         sensorStates["P"] = parseStatus(dataMap.getString(ProtocolContract.Keys.PRESS_STATUS))
                         sensorStates["R"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ROT_STATUS))
+                        
+                        val locMode = dataMap.getString(ProtocolContract.Keys.LOC_STATUS)
+                        gpsModeState.value = try { GpsMode.valueOf(locMode ?: GpsMode.WATCH_ONLY.name) } catch(e: Exception) { GpsMode.WATCH_ONLY }
 
                         dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json -> 
                             try { telemetryState.value = explicitJson.decodeFromString<TelemetryState>(json) } catch(e: Exception) { } 
@@ -262,13 +344,35 @@ class MainActivity : ComponentActivity(),
 }
 
 @Composable
-fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, inferenceState: VehicleInferenceState, sensorStates: SnapshotStateMap<String, SensorStatus>, onCommand: (String) -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDashboard: () -> Unit, onNavigateToLogs: () -> Unit) {
+fun MainAppContent(
+    isWatchActive: Boolean,
+    isConnected: Boolean,
+    inferenceState: VehicleInferenceState,
+    sensorStates: SnapshotStateMap<String, SensorStatus>,
+    gpsMode: GpsMode,
+    telemetry: TelemetryState,
+    onCommand: (String) -> Unit,
+    onNavigateToSettings: () -> Unit,
+    onNavigateToDashboard: () -> Unit,
+    onNavigateToLogs: () -> Unit
+) {
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("WATCH² OUT", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
             StatusBadge(isConnected)
+            
+            if (isConnected) {
+                Spacer(modifier = Modifier.height(8.dp))
+                FusionStatusCard(gpsMode, telemetry.pGpsSpeed)
+            }
         }
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+        // System Confidence Section
+        if (isConnected && isWatchActive) {
+            ConfidenceIndicator(crashScore = telemetry.crashScore)
+        }
+
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("A", "G", "P", "R").forEach { key ->
                 val status = sensorStates[key] ?: SensorStatus.UNKNOWN
                 val fullName = when(key) { "A" -> "ACCELEROMETER"; "G" -> "GYROSCOPE"; "P" -> "PRESSURE"; "R" -> "ROTATION"; else -> "UNKNOWN" }
@@ -288,6 +392,71 @@ fun MainAppContent(isWatchActive: Boolean, isConnected: Boolean, inferenceState:
             LargeNavButton(label = "HISTORY", icon = Icons.Default.History, modifier = Modifier.weight(1f), onClick = onNavigateToLogs)
             LargeNavButton(label = "SETTINGS", icon = Icons.Default.Settings, modifier = Modifier.weight(1f), enabled = isConnected, onClick = onNavigateToSettings)
         }
+    }
+}
+
+@Composable
+fun FusionStatusCard(mode: GpsMode, speed: Float) {
+    val isFusion = mode == GpsMode.PHONE_PRIMARY
+    val color = if (isFusion) Color(0xFF42A5F5) else Color(0xFFFFA726)
+    val text = if (isFusion) "GPS FUSION: ACTIVE (PHONE)" else "GPS FUSION: STANDALONE (WATCH)"
+    
+    Surface(
+        color = color.copy(alpha = 0.1f),
+        shape = MaterialTheme.shapes.small,
+        border = BorderStroke(1.dp, color.copy(alpha = 0.3f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(modifier = Modifier.size(8.dp).background(color, CircleShape))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                color = color,
+                fontWeight = FontWeight.Bold
+            )
+            if (speed > 0) {
+                Text(
+                    text = "${speed.toInt()} km/h",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color.copy(alpha = 0.7f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ConfidenceIndicator(crashScore: Float) {
+    val confidence = ((1f - crashScore.coerceIn(0f, 1f)) * 100).toInt()
+    val color = when {
+        confidence > 80 -> Color(0xFF4CAF50)
+        confidence > 50 -> Color(0xFFFBC02D)
+        else -> Color(0xFFD32F2F)
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Text("SYSTEM CONFIDENCE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            Text("$confidence%", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Black, color = color)
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        LinearProgressIndicator(
+            progress = { confidence / 100f },
+            modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
+            color = color,
+            trackColor = color.copy(alpha = 0.2f)
+        )
     }
 }
 
