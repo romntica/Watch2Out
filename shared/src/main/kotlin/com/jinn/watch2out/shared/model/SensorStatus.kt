@@ -8,14 +8,15 @@ import kotlinx.serialization.Serializable
  */
 @Serializable
 enum class SensorStatus {
-    /** Sensor is available and functioning. */
     AVAILABLE,
-    /** Sensor exists but is disabled via user settings. */
     DISABLED,
-    /** Sensor is temporarily unavailable or busy. */
     UNAVAILABLE,
-    /** Physical hardware sensor is missing on this device. */
     MISSING,
-    /** Connection to the remote node is lost. */
-    UNKNOWN
+    UNKNOWN,
+
+    // GPS Specific Fix States (v28.5.4)
+    NO_FIX,
+    FIX_2D,
+    FIX_3D,
+    LOW_ACC
 }

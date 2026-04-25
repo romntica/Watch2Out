@@ -34,6 +34,8 @@ object ProtocolContract {
         const val STATUS_SYNC = "$BASE/sync/status"
         const val HEARTBEAT_SYNC = "$BASE/sync/heartbeat"
         const val REQUEST_SETTINGS = "$BASE/sync/request_settings"
+        const val FULL_SYNC_REQUEST = "$BASE/sync/request_full"
+        const val SENSOR_STATUS_REQUEST = "$BASE/sync/request_sensor_status"
         
         // Incident Reporting
         const val INCIDENT_REPORT = "$BASE/report/incident"
@@ -46,6 +48,9 @@ object ProtocolContract {
 
         // Telemetry Logging (v27.4)
         const val TELEMETRY_LOG = "$BASE/log/telemetry"
+
+        // Sync Policy (v28.5.3)
+        const val SYNC_POLICY_UPDATE = "$BASE/control/sync_policy"
     }
     
     object Keys {
@@ -55,11 +60,14 @@ object ProtocolContract {
         const val TELEMETRY_JSON = "telemetry_json"
         const val HEARTBEAT_JSON = "heartbeat_json"
         const val IS_ACTIVE = "is_active"
+        const val SYNC_MODE_HIGH_SPEED = "sync_mode_high_speed"
         const val ACCEL_STATUS = "accel_status"
         const val GYRO_STATUS = "gyro_status"
         const val PRESS_STATUS = "press_status"
         const val ROT_STATUS = "rot_status"
         const val LOC_STATUS = "loc_status"
+        const val WATCH_GPS_STATUS = "watch_gps_status"
+        const val WATCH_GPS_TEXT = "watch_gps_text"
         const val MIC_STATUS = "mic_status"
         const val SMS_STATUS = "sms_status"
         const val CALL_STATUS = "call_status"

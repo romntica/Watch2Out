@@ -1,13 +1,19 @@
 // [Module: :wear]
 package com.jinn.watch2out.wear.service
 
+import android.content.Context
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorManager
 import android.util.Log
 import com.google.android.gms.wearable.*
 import com.jinn.watch2out.shared.model.Heartbeat
+import com.jinn.watch2out.shared.model.IncidentState
+import com.jinn.watch2out.shared.model.SensorStatus
 import com.jinn.watch2out.shared.model.WatchSettings
 import com.jinn.watch2out.shared.network.ProtocolContract
 import com.jinn.watch2out.wear.data.SettingsRepository
+import com.jinn.watch2out.wear.service.SentinelService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.tasks.await
@@ -33,29 +39,50 @@ class WatchMessageService : WearableListenerService() {
         dataEvents.forEach { event ->
             val path = event.dataItem.uri.path ?: return@forEach
             if (event.type == DataEvent.TYPE_CHANGED) {
-                when (path) {
-                    ProtocolContract.Paths.SETTINGS_SYNC -> {
+                when {
+                    path.startsWith(ProtocolContract.Paths.SETTINGS_SYNC) -> {
                         val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
-                        val json = dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON)
-                        if (json != null) {
-                            serviceScope.launch {
-                                try {
-                                    val newSettings = Json.decodeFromString<WatchSettings>(json)
+                        val json = dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON) ?: return@forEach
+                        
+                        serviceScope.launch {
+                            try {
+                                val currentSettings = settingsRepository.settingsFlow.first()
+                                val newSettings = Json.decodeFromString<WatchSettings>(json)
+                                
+                                // Optimization: Only update if the settings have actually changed
+                                // This reduces Disk I/O (Read_top) and unnecessary background work.
+                                if (newSettings != currentSettings) {
                                     settingsRepository.updateSettings(newSettings)
-                                } catch (e: Exception) { }
+                                    Log.d(TAG, "⚙️ Settings updated from remote")
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "❌ Failed to parse settings: ${e.message}")
                             }
                         }
                     }
-                    ProtocolContract.Paths.HEARTBEAT_SYNC -> {
+                    path.startsWith(ProtocolContract.Paths.HEARTBEAT_SYNC) -> {
                         val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
-                        val json = dataMap.getString(ProtocolContract.Keys.HEARTBEAT_JSON)
-                        if (json != null) {
-                            val intent = Intent(applicationContext, SentinelService::class.java).apply {
-                                action = SentinelService.ACTION_UPDATE_HEARTBEAT
-                                putExtra("heartbeat_json", json)
+                        val json = dataMap.getString(ProtocolContract.Keys.HEARTBEAT_JSON) ?: return@forEach
+
+                        // Crash Recovery Guardian (v28.6.5)
+                        if (!SentinelService.isRunning) {
+                            serviceScope.launch {
+                                val persistedState = settingsRepository.monitoringStateFlow.first()
+                                if (persistedState == IncidentState.MONITORING.name) {
+                                    Log.w(TAG, "Guardian (HB): SentinelService not running but should be. Restarting...")
+                                    val startIntent = Intent(applicationContext, SentinelService::class.java).apply {
+                                        action = SentinelService.ACTION_START_MONITORING
+                                    }
+                                    startForegroundService(startIntent)
+                                }
                             }
-                            startService(intent)
                         }
+                        
+                        val intent = Intent(applicationContext, SentinelService::class.java).apply {
+                            action = SentinelService.ACTION_UPDATE_HEARTBEAT
+                            putExtra("heartbeat_json", json)
+                        }
+                        startService(intent)
                     }
                 }
             }
@@ -67,6 +94,20 @@ class WatchMessageService : WearableListenerService() {
         if (!path.startsWith("/watch2out/v${ProtocolContract.VERSION}")) return
 
         Log.d(TAG, "📩 Remote Message: $path")
+
+        // Crash Recovery Guardian (v28.6.5)
+        if (!SentinelService.isRunning) {
+            serviceScope.launch {
+                val persistedState = settingsRepository.monitoringStateFlow.first()
+                if (persistedState == IncidentState.MONITORING.name && path != ProtocolContract.Paths.STOP_MONITORING) {
+                    Log.w(TAG, "Guardian: SentinelService not running but should be. Restarting...")
+                    val intent = Intent(applicationContext, SentinelService::class.java).apply {
+                        action = SentinelService.ACTION_START_MONITORING
+                    }
+                    startForegroundService(intent)
+                }
+            }
+        }
 
         serviceScope.launch {
             when (path) {
@@ -94,7 +135,9 @@ class WatchMessageService : WearableListenerService() {
                 ProtocolContract.Paths.STOP_MONITORING,
                 ProtocolContract.Paths.RESET_PEAKS,
                 ProtocolContract.Paths.DASHBOARD_START,
-                ProtocolContract.Paths.DASHBOARD_STOP -> {
+                ProtocolContract.Paths.DASHBOARD_STOP,
+                ProtocolContract.Paths.SYNC_POLICY_UPDATE,
+                ProtocolContract.Paths.FULL_SYNC_REQUEST -> {
                     val intent = Intent(applicationContext, SentinelService::class.java).apply {
                         action = when (path) {
                             ProtocolContract.Paths.START_MONITORING -> SentinelService.ACTION_START_MONITORING
@@ -102,7 +145,13 @@ class WatchMessageService : WearableListenerService() {
                             ProtocolContract.Paths.RESET_PEAKS -> SentinelService.ACTION_RESET_PEAKS
                             ProtocolContract.Paths.DASHBOARD_START -> SentinelService.ACTION_DASHBOARD_START
                             ProtocolContract.Paths.DASHBOARD_STOP -> SentinelService.ACTION_DASHBOARD_STOP
+                            ProtocolContract.Paths.SYNC_POLICY_UPDATE -> SentinelService.ACTION_UPDATE_SYNC_POLICY
+                            ProtocolContract.Paths.FULL_SYNC_REQUEST -> SentinelService.ACTION_FORCE_SYNC
                             else -> null
+                        }
+                        if (path == ProtocolContract.Paths.SYNC_POLICY_UPDATE) {
+                            val highSpeed = messageEvent.data?.getOrNull(0)?.toInt() == 1
+                            putExtra("high_speed", highSpeed)
                         }
                     }
                     intent.action?.let {
@@ -112,6 +161,11 @@ class WatchMessageService : WearableListenerService() {
                             startService(intent)
                         }
                     }
+                }
+
+                ProtocolContract.Paths.SENSOR_STATUS_REQUEST -> {
+                    Log.d(TAG, "⚡ Fast Path: Responding to Sensor Status Request")
+                    sendImmediateSensorStatus()
                 }
 
                 ProtocolContract.Paths.SIMULATE_FRONTAL,
@@ -147,6 +201,35 @@ class WatchMessageService : WearableListenerService() {
             }.asPutDataRequest().setUrgent()
             Wearable.getDataClient(this@WatchMessageService).putDataItem(putDataReq).await()
         } catch (e: Exception) { }
+    }
+
+    private fun sendImmediateSensorStatus() {
+        serviceScope.launch {
+            try {
+                val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                
+                fun check(type: Int): String = 
+                    if (sensorManager.getDefaultSensor(type) != null) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name
+
+                val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
+                    dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, SentinelService.lastKnownState != IncidentState.IDLE)
+                    dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+                    
+                    dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, check(Sensor.TYPE_ACCELEROMETER))
+                    dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, check(Sensor.TYPE_GYROSCOPE))
+                    dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, check(Sensor.TYPE_PRESSURE))
+                    dataMap.putString(ProtocolContract.Keys.ROT_STATUS, check(Sensor.TYPE_ROTATION_VECTOR))
+                    dataMap.putString(ProtocolContract.Keys.WATCH_GPS_STATUS, SensorStatus.UNAVAILABLE.name)
+                    dataMap.putString(ProtocolContract.Keys.WATCH_GPS_TEXT, "Searching...")
+                    
+                    setUrgent()
+                }.asPutDataRequest()
+                Wearable.getDataClient(this@WatchMessageService).putDataItem(putDataReq).await()
+                Log.d(TAG, "✅ Immediate Sensor Status Sent (Fast Path)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send immediate sensor status", e)
+            }
+        }
     }
 
     override fun onDestroy() {

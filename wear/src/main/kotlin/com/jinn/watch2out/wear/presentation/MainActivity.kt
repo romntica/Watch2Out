@@ -167,6 +167,10 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
     val telemetry = telemetryState?.value ?: TelemetryState()
     val serviceStateFlow = service?.currentState?.collectAsState()
     val serviceState = serviceStateFlow?.value ?: IncidentState.IDLE
+    
+    // v27.6 Optimization: Key performance values are isolated to prevent total recomposition
+    val vehicleInferenceState by remember(telemetry) { derivedStateOf { telemetry.vehicleInferenceState } }
+    val gpsMode by remember(telemetry) { derivedStateOf { service?.currentGpsMode ?: GpsMode.WATCH_ONLY } }
 
     MaterialTheme {
         Scaffold(
@@ -178,7 +182,7 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
                     MainScreen(
                         settings = settings,
                         isMonitoring = serviceState == IncidentState.MONITORING,
-                        inferenceState = telemetry.vehicleInferenceState.name,
+                        inferenceState = vehicleInferenceState.name,
                         onStartMonitoring = {
                             val intent = Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_START_MONITORING }
                             context.startForegroundService(intent)
@@ -187,7 +191,7 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
                             val intent = Intent(context, SentinelService::class.java).apply { action = SentinelService.ACTION_STOP_MONITORING }
                             context.startService(intent)
                         },
-                        gpsMode = service?.currentGpsMode ?: GpsMode.WATCH_ONLY,
+                        gpsMode = gpsMode,
                         onNavigateToSettings = { currentScreen = WearNavScreen.Settings },
                         onNavigateToDashboard = { currentScreen = WearNavScreen.Dashboard }
                     )
@@ -298,7 +302,13 @@ fun FusionBadge(mode: GpsMode) {
 
 @Composable
 fun SensorIndicator(label: String, status: SensorStatus) {
-    val bgColor = when (status) { SensorStatus.AVAILABLE -> Color.Green; SensorStatus.DISABLED -> Color.DarkGray; SensorStatus.UNAVAILABLE -> Color.Red; SensorStatus.MISSING -> Color.Gray; SensorStatus.UNKNOWN -> Color.Gray }
+    val bgColor = when (status) { 
+        SensorStatus.AVAILABLE, SensorStatus.FIX_3D -> Color.Green
+        SensorStatus.FIX_2D, SensorStatus.LOW_ACC -> Color.Yellow
+        SensorStatus.DISABLED -> Color.DarkGray
+        SensorStatus.NO_FIX, SensorStatus.UNAVAILABLE, SensorStatus.MISSING -> Color.Red
+        SensorStatus.UNKNOWN -> Color.Gray 
+    }
     Box(modifier = Modifier.size(14.dp).background(bgColor, CircleShape), contentAlignment = Alignment.Center) { Text(text = label, color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Bold) }
 }
 

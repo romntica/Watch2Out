@@ -8,18 +8,27 @@ import android.location.Location
 import android.net.Uri
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
@@ -45,6 +54,7 @@ import com.jinn.watch2out.service.PhoneGpsManager
 import com.jinn.watch2out.shared.model.*
 import com.jinn.watch2out.shared.network.ProtocolContract
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
@@ -87,6 +97,25 @@ class MainActivity : ComponentActivity(),
         encodeDefaults = true
     }
 
+    @Composable
+    fun UpdateIndicatorsEffect() {
+        LaunchedEffect(telemetryState.value, isWatchActiveState.value) {
+            // This ensures sensorStates SnapshotStateMap is updated whenever telemetryState changes
+            val t = telemetryState.value
+            val isActive = isWatchActiveState.value
+            
+            // Phase 7: UI Logic - Show actual status if we have telemetry (even if IDLE/STOPPED)
+            // But default to DISABLED/OFF visually if not monitoring to keep it clean.
+            // If the user pulled-to-refresh, they will see the real Wear hardware state.
+            sensorStates["A"] = t.accelStatus
+            sensorStates["G"] = t.gyroStatus
+            sensorStates["P"] = t.pressureStatus
+            sensorStates["R"] = t.rotationStatus
+            sensorStates["L"] = t.gpsStatus
+        }
+    }
+
+    @OptIn(ExperimentalMaterialApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         alertDispatcher = MobileAlertDispatcher(this)
@@ -99,39 +128,76 @@ class MainActivity : ComponentActivity(),
         Wearable.getDataClient(this).addListener(this)
         
         checkConnectionStatus()
+        fetchLatestTelemetry()
         handleIntent(intent)
 
         setContent {
             var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
+            UpdateIndicatorsEffect()
+
+            val refreshing = remember { mutableStateOf(false) }
+            val pullRefreshState = rememberPullRefreshState(
+                refreshing = refreshing.value,
+                onRefresh = {
+                    lifecycleScope.launch {
+                        refreshing.value = true
+                        requestFullTelemetrySync()
+                        delay(2000)
+                        refreshing.value = false
+                    }
+                }
+            )
+
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     when (currentScreen) {
-                        is Screen.Main -> MainAppContent(
-                            isWatchActive = isWatchActiveState.value,
-                            isConnected = isConnectedState.value,
-                            inferenceState = telemetryState.value.vehicleInferenceState,
-                            sensorStates = sensorStates,
-                            gpsMode = gpsModeState.value,
-                            telemetry = telemetryState.value,
-                            onCommand = { cmd -> sendRemoteCommand(cmd) },
-                            onNavigateToSettings = { requestWatchSettings(); currentScreen = Screen.Settings },
-                            onNavigateToDashboard = { currentScreen = Screen.Dashboard },
-                            onNavigateToLogs = { currentScreen = Screen.TelemetryLogs }
-                        )
-                        is Screen.Settings -> key(watchSettingsState.value) {
-                            SettingsScreen(
-                                currentSettings = watchSettingsState.value,
-                                isConnected = isConnectedState.value,
-                                onApply = { settings -> sendSettings(settings); currentScreen = Screen.Main },
-                                onCancel = { currentScreen = Screen.Main },
-                                onSimulatePreset = { path -> sendRemoteCommand(path) },
-                                onInjectCustomData = { ax, ay, az, gx, sp, pr -> injectCustomSensor(ax, ay, az, gx, sp, pr) }
-                            )
+                        is Screen.Main -> {
+                            Box(modifier = Modifier
+                                .fillMaxSize()
+                                .pullRefresh(pullRefreshState)
+                            ) {
+                                MainAppContent(
+                                    isWatchActive = isWatchActiveState.value,
+                                    isConnected = isConnectedState.value,
+                                    inferenceState = telemetryState.value.vehicleInferenceState,
+                                    sensorStates = sensorStates,
+                                    gpsMode = gpsModeState.value,
+                                    telemetry = telemetryState.value,
+                                    onCommand = { cmd -> sendRemoteCommand(cmd) },
+                                    onNavigateToSettings = { requestWatchSettings(); currentScreen = Screen.Settings },
+                                    onNavigateToDashboard = { currentScreen = Screen.Dashboard },
+                                    onNavigateToLogs = { currentScreen = Screen.TelemetryLogs }
+                                )
+                                PullRefreshIndicator(
+                                    refreshing = refreshing.value,
+                                    state = pullRefreshState,
+                                    modifier = Modifier.align(Alignment.TopCenter)
+                                )
+                            }
+                        }
+                        is Screen.Settings -> {
+                            BackHandler { currentScreen = Screen.Main }
+                            key(watchSettingsState.value) {
+                                SettingsScreen(
+                                    currentSettings = watchSettingsState.value,
+                                    isConnected = isConnectedState.value,
+                                    onApply = { settings -> sendSettings(settings); currentScreen = Screen.Main },
+                                    onCancel = { currentScreen = Screen.Main },
+                                    onSimulatePreset = { path -> sendRemoteCommand(path) },
+                                    onInjectCustomData = { ax, ay, az, gx, sp, pr -> injectCustomSensor(ax, ay, az, gx, sp, pr) }
+                                )
+                            }
                         }
                         is Screen.Dashboard -> {
+                            BackHandler { currentScreen = Screen.Main }
                             DisposableEffect(Unit) {
+                                sendSyncPolicy(highSpeed = true)
                                 sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_START)
-                                onDispose { sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_STOP) }
+                                onDispose { 
+                                    sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_STOP)
+                                    // Rule: Revert to 5s sync (battery save) when exiting dashboard
+                                    sendSyncPolicy(highSpeed = false)
+                                }
                             }
                             DashboardScreen(
                                 telemetry = telemetryState.value,
@@ -140,6 +206,7 @@ class MainActivity : ComponentActivity(),
                             )
                         }
                         is Screen.TelemetryLogs -> {
+                            BackHandler { currentScreen = Screen.Main }
                             TelemetryLogScreen(onClose = { currentScreen = Screen.Main })
                         }
                     }
@@ -172,6 +239,10 @@ class MainActivity : ComponentActivity(),
     }
 
     private fun startLocationUpdates() {
+        if (PhoneGpsManager.IS_RESERVED_MODE) {
+            Log.d("SentinelApp", "Location updates disabled: PhoneGpsManager is in RESERVED_MODE (Watch Only Policy)")
+            return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             requestPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
             return
@@ -189,11 +260,14 @@ class MainActivity : ComponentActivity(),
     }
 
     private fun syncHeartbeatToWatch(location: Location) {
+        if (PhoneGpsManager.IS_RESERVED_MODE) return
+
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val gpsResult = phoneGpsManager.checkStatus(location, lastLocationAvailability)
                 val speedZone = phoneGpsManager.calculateSpeedZone(location, gpsResult.isHintReliable)
                 
+                val elapsedMs = (SystemClock.elapsedRealtimeNanos() - location.elapsedRealtimeNanos) / 1_000_000
                 val heartbeat = Heartbeat(
                     fsmState = telemetryState.value.vehicleInferenceState,
                     crashScore = telemetryState.value.crashScore,
@@ -202,7 +276,8 @@ class MainActivity : ComponentActivity(),
                     phoneGpsAccuracy = location.accuracy,
                     phoneSpeedKmh = location.speed * 3.6f,
                     isSpeedHintReliable = gpsResult.isHintReliable,
-                    speedZone = speedZone
+                    speedZone = speedZone,
+                    elapsedMs = elapsedMs
                 )
 
                 val nodes = Wearable.getNodeClient(this@MainActivity).connectedNodes.await()
@@ -286,7 +361,9 @@ class MainActivity : ComponentActivity(),
                 
                 when (path) {
                     ProtocolContract.Paths.STATUS_SYNC -> {
-                        isWatchActiveState.value = dataMap.getBoolean(ProtocolContract.Keys.IS_ACTIVE)
+                        val isActive = dataMap.getBoolean(ProtocolContract.Keys.IS_ACTIVE)
+                        isWatchActiveState.value = isActive
+                        
                         sensorStates["A"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ACCEL_STATUS))
                         sensorStates["G"] = parseStatus(dataMap.getString(ProtocolContract.Keys.GYRO_STATUS))
                         sensorStates["P"] = parseStatus(dataMap.getString(ProtocolContract.Keys.PRESS_STATUS))
@@ -294,9 +371,44 @@ class MainActivity : ComponentActivity(),
                         
                         val locMode = dataMap.getString(ProtocolContract.Keys.LOC_STATUS)
                         gpsModeState.value = try { GpsMode.valueOf(locMode ?: GpsMode.WATCH_ONLY.name) } catch(e: Exception) { GpsMode.WATCH_ONLY }
+                        
+                        // Phase 7: Parse GPS status from DataMap (v28.6)
+                        val gpsStatusStr = dataMap.getString(ProtocolContract.Keys.WATCH_GPS_STATUS)
+                        if (gpsStatusStr != null) {
+                            sensorStates["L"] = parseStatus(gpsStatusStr)
+                        } else {
+                            sensorStates["L"] = if (isConnectedState.value) SensorStatus.AVAILABLE else SensorStatus.UNKNOWN
+                        }
+                        
+                        // v28.6.1: Capture direct status text if available
+                        dataMap.getString(ProtocolContract.Keys.WATCH_GPS_TEXT)?.let { text ->
+                             telemetryState.value = telemetryState.value.copy(gpsStatusText = text)
+                        }
 
                         dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json -> 
-                            try { telemetryState.value = explicitJson.decodeFromString<TelemetryState>(json) } catch(e: Exception) { } 
+                            try { 
+                                val newTelemetry = explicitJson.decodeFromString<TelemetryState>(json)
+                                val now = System.currentTimeMillis()
+                                val lag = if (newTelemetry.wearTimestamp > 0) now - newTelemetry.wearTimestamp else 0L
+                                
+                                telemetryState.value = newTelemetry.copy(
+                                    syncLagMs = lag,
+                                    lastUpdateTime = now
+                                )
+                                
+                                // Phase 7: Sync indicator states (v28.6)
+                                // We trust top-level IS_ACTIVE for the button to avoid IDLE-movement flicker
+                                sensorStates["A"] = newTelemetry.accelStatus
+                                sensorStates["G"] = newTelemetry.gyroStatus
+                                sensorStates["P"] = newTelemetry.pressureStatus
+                                sensorStates["R"] = newTelemetry.rotationStatus
+                                
+                                // Specific GPS logic: If monitoring is active, use detailed status from telemetry
+                                sensorStates["L"] = if (!isActive) SensorStatus.DISABLED 
+                                                    else newTelemetry.gpsStatus
+                            } catch(e: Exception) { 
+                                Log.e("SentinelSync", "Failed to decode telemetry", e)
+                            }
                         }
                     }
                     ProtocolContract.Paths.SETTINGS_SYNC -> {
@@ -310,6 +422,57 @@ class MainActivity : ComponentActivity(),
     }
 
     private fun parseStatus(name: String?): SensorStatus = try { SensorStatus.valueOf(name ?: SensorStatus.UNKNOWN.name) } catch(e: Exception) { SensorStatus.UNKNOWN }
+
+    private fun fetchLatestTelemetry() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val dataItems = Wearable.getDataClient(this@MainActivity)
+                    .getDataItems(Uri.parse("wear://*/${ProtocolContract.Paths.STATUS_SYNC}"))
+                    .await()
+                
+                dataItems.forEach { item ->
+                    val dataMap = DataMapItem.fromDataItem(item).dataMap
+                    val isActive = dataMap.getBoolean(ProtocolContract.Keys.IS_ACTIVE)
+                    
+                    launch(Dispatchers.Main) {
+                        isWatchActiveState.value = isActive
+                        sensorStates["A"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ACCEL_STATUS))
+                        sensorStates["G"] = parseStatus(dataMap.getString(ProtocolContract.Keys.GYRO_STATUS))
+                        sensorStates["P"] = parseStatus(dataMap.getString(ProtocolContract.Keys.PRESS_STATUS))
+                        sensorStates["R"] = parseStatus(dataMap.getString(ProtocolContract.Keys.ROT_STATUS))
+                        
+                        val gpsStatusStr = dataMap.getString(ProtocolContract.Keys.WATCH_GPS_STATUS)
+                        if (gpsStatusStr != null) {
+                            sensorStates["L"] = parseStatus(gpsStatusStr)
+                        }
+                    }
+
+                    dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json ->
+                        try {
+                            val telemetry = explicitJson.decodeFromString<TelemetryState>(json)
+                            val now = System.currentTimeMillis()
+                            val lag = if (telemetry.wearTimestamp > 0) now - telemetry.wearTimestamp else 0L
+                            
+                            launch(Dispatchers.Main) {
+                                telemetryState.value = telemetry.copy(
+                                    syncLagMs = lag,
+                                    lastUpdateTime = now
+                                )
+                                sensorStates["A"] = telemetry.accelStatus
+                                sensorStates["G"] = telemetry.gyroStatus
+                                sensorStates["P"] = telemetry.pressureStatus
+                                sensorStates["R"] = telemetry.rotationStatus
+                                sensorStates["L"] = if (!isActive) SensorStatus.DISABLED 
+                                                    else telemetry.gpsStatus
+                            }
+                        } catch (e: Exception) { }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("SentinelSync", "Initial telemetry fetch failed", e)
+            }
+        }
+    }
 
     private fun requestWatchSettings() {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -341,6 +504,47 @@ class MainActivity : ComponentActivity(),
             } catch (e: Exception) { }
         }
     }
+
+    private suspend fun requestFullTelemetrySync() {
+        try {
+            val nodes = Wearable.getNodeClient(this).connectedNodes.await()
+            for (node in nodes) {
+                // Request 1: Full Telemetry (for Dashboard data if active)
+                Wearable.getMessageClient(this).sendMessage(
+                    node.id,
+                    ProtocolContract.Paths.FULL_SYNC_REQUEST,
+                    "FULL_SYNC_NOW".toByteArray()
+                ).await()
+                
+                // Request 2: Immediate Sensor Status (for Indicators parity)
+                Wearable.getMessageClient(this).sendMessage(
+                    node.id,
+                    ProtocolContract.Paths.SENSOR_STATUS_REQUEST,
+                    "CHECK_SENSORS".toByteArray()
+                ).await()
+            }
+            delay(1500)
+            fetchLatestTelemetry()
+        } catch (e: Exception) {
+            Log.e("SentinelSync", "Full sync request failed", e)
+        }
+    }
+
+    private fun sendSyncPolicy(highSpeed: Boolean) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val nodes = Wearable.getNodeClient(this@MainActivity).connectedNodes.await()
+                val data = byteArrayOf(if (highSpeed) 1 else 0)
+                for (node in nodes) {
+                    Wearable.getMessageClient(this@MainActivity).sendMessage(
+                        node.id, 
+                        ProtocolContract.Paths.SYNC_POLICY_UPDATE, 
+                        data
+                    ).await()
+                }
+            } catch (e: Exception) { }
+        }
+    }
 }
 
 @Composable
@@ -356,7 +560,12 @@ fun MainAppContent(
     onNavigateToDashboard: () -> Unit,
     onNavigateToLogs: () -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
+    Column(modifier = Modifier
+        .fillMaxSize()
+        .verticalScroll(rememberScrollState())
+        .padding(16.dp), 
+        horizontalAlignment = Alignment.CenterHorizontally, 
+        verticalArrangement = Arrangement.SpaceBetween) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("WATCH² OUT", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
             StatusBadge(isConnected)
@@ -373,14 +582,32 @@ fun MainAppContent(
         }
 
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("A", "G", "P", "R").forEach { key ->
+            listOf("A", "G", "P", "R", "L").forEach { key ->
                 val status = sensorStates[key] ?: SensorStatus.UNKNOWN
-                val fullName = when(key) { "A" -> "ACCELEROMETER"; "G" -> "GYROSCOPE"; "P" -> "PRESSURE"; "R" -> "ROTATION"; else -> "UNKNOWN" }
-                FullSensorIndicator(fullName, status)
+                val fullName = when(key) { 
+                    "A" -> "ACCELEROMETER"
+                    "G" -> "GYROSCOPE"
+                    "P" -> "PRESSURE"
+                    "R" -> "ROTATION"
+                    "L" -> "GPS (WATCH)"
+                    else -> "UNKNOWN" 
+                }
+                val text = if (key == "L") telemetry.gpsStatusText else null
+                FullSensorIndicator(fullName, status, text)
             }
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Button(onClick = { onCommand(if (isWatchActive) ProtocolContract.Paths.STOP_MONITORING else ProtocolContract.Paths.START_MONITORING) }, enabled = isConnected, modifier = Modifier.size(200.dp), shape = CircleShape, colors = ButtonDefaults.buttonColors(containerColor = if (!isConnected) Color.DarkGray else if (isWatchActive) Color(0xFFD32F2F) else Color(0xFF388E3C)), elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)) {
+            val startButtonColor = if (!isConnected) Color.DarkGray 
+                                    else if (isWatchActive) Color(0xFFD32F2F) 
+                                    else if (PhoneGpsManager.IS_RESERVED_MODE) Color(0xFF388E3C)
+                                    else Color(0xFF388E3C)
+            
+            Button(onClick = { onCommand(if (isWatchActive) ProtocolContract.Paths.STOP_MONITORING else ProtocolContract.Paths.START_MONITORING) }, 
+                   enabled = isConnected, 
+                   modifier = Modifier.size(200.dp), 
+                   shape = CircleShape, 
+                   colors = ButtonDefaults.buttonColors(containerColor = startButtonColor), 
+                   elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(text = if (isWatchActive) "STOP" else "START", fontSize = 34.sp, fontWeight = FontWeight.Black)
                     if (isConnected) Text(text = if (isWatchActive) inferenceState.name else "READY TO ARM", style = MaterialTheme.typography.labelLarge, color = Color.Yellow.copy(alpha = 0.9f))
@@ -397,9 +624,9 @@ fun MainAppContent(
 
 @Composable
 fun FusionStatusCard(mode: GpsMode, speed: Float) {
-    val isFusion = mode == GpsMode.PHONE_PRIMARY
-    val color = if (isFusion) Color(0xFF42A5F5) else Color(0xFFFFA726)
-    val text = if (isFusion) "GPS FUSION: ACTIVE (PHONE)" else "GPS FUSION: STANDALONE (WATCH)"
+    val isReserved = PhoneGpsManager.IS_RESERVED_MODE
+    val color = if (isReserved) Color.Gray else if (mode == GpsMode.PHONE_PRIMARY) Color(0xFF42A5F5) else Color(0xFFFFA726)
+    val text = if (isReserved) "GPS POLICY: WATCH-ONLY (ACTIVE)" else if (mode == GpsMode.PHONE_PRIMARY) "GPS FUSION: ACTIVE (PHONE)" else "GPS FUSION: STANDALONE (WATCH)"
     
     Surface(
         color = color.copy(alpha = 0.1f),
@@ -469,11 +696,24 @@ fun StatusBadge(isConnected: Boolean) {
 }
 
 @Composable
-fun FullSensorIndicator(name: String, status: SensorStatus) {
-    val color = when (status) { SensorStatus.AVAILABLE -> Color(0xFF4CAF50); SensorStatus.DISABLED -> Color(0xFFFBC02D); SensorStatus.UNAVAILABLE, SensorStatus.MISSING -> Color(0xFFD32F2F); SensorStatus.UNKNOWN -> Color(0xFFB0BEC5) }
+fun FullSensorIndicator(name: String, status: SensorStatus, displayText: String? = null) {
+    val color = when (status) { 
+        SensorStatus.AVAILABLE, SensorStatus.FIX_3D -> Color(0xFF4CAF50)
+        SensorStatus.FIX_2D, SensorStatus.LOW_ACC -> Color(0xFFFBC02D)
+        SensorStatus.DISABLED -> Color.Gray
+        SensorStatus.NO_FIX, SensorStatus.UNAVAILABLE, SensorStatus.MISSING -> Color(0xFFD32F2F)
+        SensorStatus.UNKNOWN -> Color(0xFFB0BEC5) 
+    }
+    
+    val text = when {
+        status == SensorStatus.DISABLED -> "OFF"
+        displayText != null -> displayText
+        else -> status.name
+    }
+    
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
         Text(text = name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f))
-        Text(text = status.name, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold, color = color)
+        Text(text = text.uppercase(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold, color = color)
     }
 }
 

@@ -108,7 +108,7 @@ class IncidentAlertActivity : ComponentActivity() {
                 label = "Blink"
             )
 
-            // Core Logic: 15s 무반응 시 즉시 발송
+            // Core Logic: Dispatch immediately after 15s of no response
             LaunchedEffect(uiState) {
                 if (uiState == UIState.ALERTING) {
                     while (countdown > 0) {
@@ -187,6 +187,11 @@ class IncidentAlertActivity : ComponentActivity() {
                     Wearable.getMessageClient(this@IncidentAlertActivity)
                         .sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_DISMISS, null).await()
                 }
+                // v27.6: Also notify local SentinelService to delete sensitive evidence
+                val dismissIntent = Intent(this@IncidentAlertActivity, SentinelService::class.java).apply {
+                    action = SentinelService.ACTION_DISMISS_INCIDENT
+                }
+                startService(dismissIntent)
             } catch (e: Exception) {
                 Log.e("IncidentAlert", "Failed to send dismiss to mobile: ${e.message}")
             }

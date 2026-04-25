@@ -3,7 +3,16 @@
 **Watch² Out** is a robust, safety-critical accident detection system for **Wear OS**, inspired by high-end crash detection algorithms. It monitors for **Vehicle Crashes (High-G)** and **Human Falls (Low-G)** in real-time.
 However, this is an experimental attempt. **NEVER TRUST** this app for real safety.
 
-## 🚀 Recent Core Enhancements (v1.3 / FSM v27.6)
+## 🚀 Recent Core Enhancements (v1.4 / FSM v28.6)
+
+### 🛡️ Crash-Recovery & Survival (v28.6.5)
+*   **Self-Healing "Guardian"**: Added background logic to automatically resume monitoring if the `SentinelService` is killed by the system.
+*   **State Persistence**: Operational state is now mirrored in `DataStore`, surviving process crashes and device reboots.
+*   **System Integration**: Implemented `BOOT_COMPLETED` receiver for zero-touch auto-start upon device power-on.
+
+### 📈 Manual Telemetry Pull (v28.6)
+*   **On-Demand Sync**: Users can now force an immediate upload of all pending telemetry logs from the Watch to the Phone via "Pull-to-Refresh" on the mobile dashboard.
+*   **Reliable Transport**: Optimized the `NodeClient` resolution to prevent `TARGET_NODE_NOT_CONNECTED` errors during manual sync events.
 
 ### 🛡️ Enhanced Crash Inference (v27.6)
 Implemented a sophisticated multi-stage State Machine (FSM) to analyze the physics of an accident:
@@ -70,6 +79,7 @@ stateDiagram-v2
 *   **Automated Diagnostics**: Self-detects GPS, Mic, and Telephony capabilities.
 *   **EDR (Blackbox)**: Persistent recording of 10s audio and high-fidelity sensor data in `/Download/watch2out`.
 *   **Survival Logic**: Redundant alert dispatching through both local LTE and mobile relay.
+*   **Indicator**: A(Accelerometer), G(Gyroscope), P(Pressure), R(Rotation Vector), L(Location/GPS), M(Microphone), T(Telephony/SMS)
 
 ### 📱 Mobile Companion (`:app`)
 *   **Sentinel Hub**: Real-time remote monitoring of watch state and sensor health.

@@ -48,6 +48,7 @@ dependencies {
     implementation(project(":shared"))
 
     implementation(libs.androidx.core.ktx)
+    implementation(libs.lifecycle.service)
     implementation(libs.play.services.wearable)
     implementation(libs.kotlinx.coroutines.play.services) 
     

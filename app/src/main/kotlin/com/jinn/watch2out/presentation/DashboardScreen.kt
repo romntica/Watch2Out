@@ -30,7 +30,9 @@ import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
+import com.jinn.watch2out.service.PhoneGpsManager
 import com.jinn.watch2out.shared.model.GpsMode
+import com.jinn.watch2out.shared.model.SensorStatus
 import com.jinn.watch2out.shared.model.TelemetryState
 import java.text.SimpleDateFormat
 import java.util.*
@@ -197,13 +199,29 @@ fun LiveFeedCard(t: TelemetryState) {
                         Box(modifier = Modifier.size(8.dp).background(Color.Red, CircleShape))
                         Spacer(Modifier.width(6.dp))
                     }
-                    Text(
-                        text = String.format(Locale.getDefault(), "%.0f km/h", t.gpsSpeed),
-                        color = if (isGpsStale) Color.Gray else Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 14.sp
-                    )
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = String.format(Locale.getDefault(), "%.1f km/h", t.gpsSpeed),
+                            color = if (isGpsStale) Color.Gray else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = formatSpeedReason(t.speedReason),
+                            fontSize = 9.sp,
+                            color = Color.Gray,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "GPS: ${t.gpsStatusText}",
+                            fontSize = 9.sp,
+                            color = Color.Gray,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
             HorizontalDivider(color = Color.DarkGray)
@@ -247,36 +265,82 @@ fun LiveFeedCard(t: TelemetryState) {
                         Box(modifier = Modifier.fillMaxWidth(t.sensorConfidence).fillMaxHeight().background(getConfidenceColor(t.sensorConfidence), CircleShape))
                     }
                 }
-                MetricItem("GYRO", String.format(Locale.getDefault(), "%.1f", t.gyroRatio), Modifier.weight(1f))
             }
 
             HorizontalDivider(color = Color.DarkGray)
-            Text("GPS FUSION STATUS (v27.7)", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text("SYNC DIAGNOSTICS (v28.6)", color = Color.Magenta, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                val lagColor = when {
+                    t.syncLagMs < 200 -> Color.Green
+                    t.syncLagMs < 1000 -> Color.Yellow
+                    else -> Color.Red
+                }
+                Text("LAG: ${t.syncLagMs}ms", color = lagColor, fontSize = 10.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                Text("REASON: ${t.syncReason}", color = Color.Gray, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+            }
+            if (t.wearTimestamp > 0) {
+                val wearTimeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(t.wearTimestamp))
+                Text("WEAR TS: $wearTimeStr", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            }
+
+            HorizontalDivider(color = Color.DarkGray)
+            Text("GPS FUSION STATUS (v28.5)", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 GpsStatusBox(
                     label = "WATCH GPS",
-                    isActive = t.isWatchGpsActive,
+                    statusText = t.gpsStatusText,
+                    isActive = t.gpsStatus == SensorStatus.FIX_3D || t.gpsStatus == SensorStatus.LOW_ACC,
                     isPrimary = t.activeGpsSource == GpsMode.WATCH_ONLY,
-                    accuracy = t.watchGpsAccuracy,
+                    signalSeen = t.gnssSignalSeen,
                     modifier = Modifier.weight(1f)
                 )
                 GpsStatusBox(
                     label = "PHONE GPS",
+                    statusText = when {
+                        t.isPhoneGpsActive -> "±${t.phoneGpsAccuracy.toInt()}m"
+                        t.offlineReason.isNotEmpty() -> t.offlineReason
+                        else -> "OFFLINE"
+                    },
                     isActive = t.isPhoneGpsActive,
                     isPrimary = t.activeGpsSource == GpsMode.PHONE_PRIMARY,
-                    accuracy = t.phoneGpsAccuracy,
+                    signalSeen = false,
                     modifier = Modifier.weight(1f)
                 )
+            }
+            
+            // Battery & CPU Diagnostic Strip
+            if (t.batteryLevel != -1) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("BATT: ${t.batteryLevel}% (${String.format("%.1f", t.batteryChangePerHour)}%/h)", color = Color.Gray, fontSize = 9.sp)
+                    Text("RAW SPD: ${String.format("%.1f", t.lastSpeedMps)}m/s", color = Color.Gray, fontSize = 9.sp)
+                }
             }
         }
     }
 }
 
 @Composable
-fun GpsStatusBox(label: String, isActive: Boolean, isPrimary: Boolean, accuracy: Float, modifier: Modifier = Modifier) {
-    val borderColor = if (isPrimary) Color(0xFF42A5F5) else if (isActive) Color(0xFF4CAF50) else Color.DarkGray
-    val bgColor = if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.1f) else Color.Transparent
+fun GpsStatusBox(label: String, statusText: String, isActive: Boolean, isPrimary: Boolean, signalSeen: Boolean = false, modifier: Modifier = Modifier) {
+    val isPhoneReserved = label.contains("PHONE") && PhoneGpsManager.IS_RESERVED_MODE
+    val statusColor = when {
+        isPhoneReserved -> Color.Gray
+        isActive -> Color.Green
+        signalSeen -> Color.Yellow // Satellite visible but no fix
+        else -> Color.Red
+    }
+    
+    val displayStatus = if (isPhoneReserved) "RESERVED" else statusText
+
+    val borderColor = if (isPhoneReserved) Color.Gray 
+                      else if (isPrimary) Color(0xFF42A5F5) 
+                      else if (isActive) Color(0xFF4CAF50) 
+                      else if (signalSeen) Color.Yellow.copy(alpha = 0.5f)
+                      else Color.DarkGray
+    
+    val bgColor = if (isPhoneReserved) Color.Black
+                  else if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.1f) 
+                  else Color.Transparent
     
     Column(
         modifier = modifier
@@ -285,21 +349,37 @@ fun GpsStatusBox(label: String, isActive: Boolean, isPrimary: Boolean, accuracy:
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(label, fontSize = 9.sp, color = if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
+        Text(label, fontSize = 9.sp, color = if (isPhoneReserved) Color.Gray else if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(6.dp).background(if (isActive) Color.Green else Color.Red, CircleShape))
+            Box(modifier = Modifier.size(6.dp).background(statusColor, CircleShape))
             Spacer(Modifier.width(4.dp))
             Text(
-                text = if (isActive) "±${accuracy.toInt()}m" else "OFFLINE",
+                text = displayStatus.uppercase(),
                 fontSize = 12.sp,
-                color = if (isActive) Color.White else Color.Gray,
+                color = if (isPhoneReserved || (!isActive && !signalSeen)) Color.Gray else Color.White,
                 fontWeight = FontWeight.Black,
                 fontFamily = FontFamily.Monospace
             )
         }
-        if (isPrimary) {
+        if (signalSeen && !isActive && !isPhoneReserved) {
+            Text("SATELLITES SEEN", fontSize = 7.sp, color = Color.Yellow, fontWeight = FontWeight.Bold)
+        }
+        if (isPrimary && !isPhoneReserved) {
             Text("PRIMARY SOURCE", fontSize = 7.sp, color = Color(0xFF42A5F5), fontWeight = FontWeight.Bold)
         }
+    }
+}
+
+private fun formatSpeedReason(reason: String): String {
+    return when (reason) {
+        "ZERO_BY_STATIONARY" -> "Stationary"
+        "ZERO_BY_LOW_CONFIDENCE" -> "Low confidence"
+        "ZERO_BY_ACCURACY" -> "Poor GPS"
+        "PASS_THROUGH" -> "Live"
+        "SPIKE_SUPPRESSED" -> "Spike suppressed"
+        "STALL_DECAY" -> "Stall decay"
+        "RAW" -> "Raw GPS"
+        else -> reason
     }
 }
 

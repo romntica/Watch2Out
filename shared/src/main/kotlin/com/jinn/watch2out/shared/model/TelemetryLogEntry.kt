@@ -10,6 +10,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class TelemetryLogEntry(
     val timestamp: Long,
+    val readableTime: String = "",
     val ax: Float,
     val ay: Float,
     val az: Float,
@@ -22,6 +23,9 @@ data class TelemetryLogEntry(
     val rz: Float,
     val rw: Float,
     val speed: Float,
+    val latitude: Double = 0.0,
+    val longitude: Double = 0.0,
+    val gpsStatus: String = "",
     val crashScore: Float = 0f,
     val fsmState: String = ""
 )

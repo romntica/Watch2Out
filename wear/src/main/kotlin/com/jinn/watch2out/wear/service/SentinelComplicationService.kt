@@ -21,8 +21,9 @@ import com.jinn.watch2out.wear.presentation.MainActivity
 class SentinelComplicationService : SuspendingComplicationDataSourceService() {
 
     override suspend fun onComplicationRequest(request: ComplicationRequest): ComplicationData? {
-        // Fetch current state from SentinelService
-        val currentState = SentinelService.lastKnownState
+        // Fetch current states from SentinelService
+        val incidentState = SentinelService.lastKnownState
+        val vState = SentinelService.lastKnownVState
         val context: Context = baseContext
 
         val tapIntent = Intent(context, MainActivity::class.java).apply {
@@ -36,12 +37,8 @@ class SentinelComplicationService : SuspendingComplicationDataSourceService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val iconRes = getIconRes(currentState)
-        val statusText = when (currentState) {
-            IncidentState.MONITORING -> "RUN"
-            IncidentState.TRIGGERED -> "ACCD"
-            else -> "IDLE"
-        }
+        val iconRes = getIconRes(incidentState, vState)
+        val statusText = getStatusText(incidentState, vState)
 
         return when (request.complicationType) {
             ComplicationType.SHORT_TEXT -> {
@@ -72,15 +69,37 @@ class SentinelComplicationService : SuspendingComplicationDataSourceService() {
     }
 
     /**
-     * Map IncidentState to AGENTS.md specified icons:
+     * Map states to AGENTS.md specified icons:
      * - MONITORING: Shield
      * - TRIGGERED: Lightning
      * - IDLE/ERROR: Broken Shield
      */
-    private fun getIconRes(state: IncidentState): Int = when (state) {
-        IncidentState.MONITORING -> R.drawable.ic_complication_monitoring
-        IncidentState.TRIGGERED -> R.drawable.ic_complication_accident
-        else -> R.drawable.ic_complication_error
+    private fun getIconRes(incidentState: IncidentState, vState: com.jinn.watch2out.shared.model.VehicleInferenceState): Int {
+        if (incidentState == IncidentState.IDLE) return R.drawable.ic_complication_error
+        
+        return when (vState) {
+            com.jinn.watch2out.shared.model.VehicleInferenceState.PRE_EVENT,
+            com.jinn.watch2out.shared.model.VehicleInferenceState.FALLING,
+            com.jinn.watch2out.shared.model.VehicleInferenceState.IMPACT,
+            com.jinn.watch2out.shared.model.VehicleInferenceState.POST_MOTION,
+            com.jinn.watch2out.shared.model.VehicleInferenceState.WAIT_CONFIRM,
+            com.jinn.watch2out.shared.model.VehicleInferenceState.CONFIRMED_CRASH -> R.drawable.ic_complication_accident
+            
+            else -> R.drawable.ic_complication_monitoring
+        }
+    }
+
+    private fun getStatusText(incidentState: IncidentState, vState: com.jinn.watch2out.shared.model.VehicleInferenceState): String {
+        if (incidentState == IncidentState.IDLE) return "IDLE"
+        if (incidentState == IncidentState.TRIGGERED) return "CRASH"
+        
+        return when (vState) {
+            com.jinn.watch2out.shared.model.VehicleInferenceState.MOVING -> "MOVE"
+            com.jinn.watch2out.shared.model.VehicleInferenceState.STILLNESS -> "STILL"
+            com.jinn.watch2out.shared.model.VehicleInferenceState.PRE_EVENT -> "WARN"
+            com.jinn.watch2out.shared.model.VehicleInferenceState.IMPACT -> "HIT!"
+            else -> "RUN"
+        }
     }
 
     override fun getPreviewData(type: ComplicationType): ComplicationData? {

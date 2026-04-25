@@ -129,7 +129,9 @@ fun LogFileItem(file: File, onClick: () -> Unit, onDelete: () -> Unit) {
 
 @Composable
 fun LogEntryRow(entry: com.jinn.watch2out.shared.model.TelemetryLogEntry) {
-    val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(entry.timestamp))
+    val timeStr = entry.readableTime.ifEmpty { 
+        SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(entry.timestamp))
+    }
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).background(Color.Black.copy(alpha = 0.05f)).padding(8.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(timeStr, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
@@ -140,8 +142,14 @@ fun LogEntryRow(entry: com.jinn.watch2out.shared.model.TelemetryLogEntry) {
             Text("SPD: ${String.format(Locale.US, "%.1f", entry.speed)} km/h", fontSize = 10.sp, fontWeight = FontWeight.Black)
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("CRS: ${String.format(Locale.US, "%.2f", entry.crashScore)}", fontSize = 10.sp, color = if(entry.crashScore > 0.7) Color.Red else Color.Unspecified)
+            val gpsLoc = if (entry.latitude != 0.0) {
+                "${String.format(Locale.US, "%.4f", entry.latitude)}, ${String.format(Locale.US, "%.4f", entry.longitude)}"
+            } else entry.gpsStatus
+            Text("GPS: $gpsLoc", fontSize = 10.sp, color = Color.Gray)
             Text("P: ${String.format(Locale.US, "%.2f", entry.pressure)} hPa", fontSize = 10.sp)
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("CRS: ${String.format(Locale.US, "%.2f", entry.crashScore)}", fontSize = 10.sp, color = if(entry.crashScore > 0.7) Color.Red else Color.Unspecified)
         }
     }
 }

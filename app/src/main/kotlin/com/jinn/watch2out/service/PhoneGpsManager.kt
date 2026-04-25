@@ -25,14 +25,18 @@ class PhoneGpsManager(private val context: Context) {
     private var lastReliableTimestamp: Long = 0
 
     companion object {
+        // Policy: Watch GPS Only (v27.7.3)
+        // Set to true to completely deactivate Phone GPS collection and usage.
+        const val IS_RESERVED_MODE = true
+
         // UI Hysteresis
         private const val UI_ACQUIRE_THRESHOLD = 25f
         private const val UI_RELEASE_THRESHOLD = 60f
         private const val UI_GRACE_PERIOD_MS = 5000L
 
         // Control Reliability (Strict)
-        private const val HINT_MAX_ACCURACY = 25f
-        private const val HINT_MAX_AGE_MS = 2000L // Reduced from 5s for control safety
+        private const val HINT_MAX_ACCURACY = 35f // Relaxed from 25f for bus stability
+        private const val HINT_MAX_AGE_MS = 5000L // Increased from 2s to 5s for vehicle environments
     }
 
     data class GpsResult(

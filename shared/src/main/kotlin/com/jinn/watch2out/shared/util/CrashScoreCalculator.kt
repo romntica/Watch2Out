@@ -91,7 +91,7 @@ object CrashScoreCalculator {
             clamp(features.rollSumDeg / 360.0f)
         } else 0f
 
-        // 2. Weights * sensor confidence + renormalize
+        // 2. Weights * sensor confidence + renormalization
         var wAccel = if (features.hasAccel) config.wAccel * sensorConfidence.accel else 0f
         var wSpeed = if (features.hasSpeed) config.wSpeed * sensorConfidence.gps else 0f
         var wGyro = if (features.hasGyro) config.wGyro * sensorConfidence.gyro else 0f
@@ -122,21 +122,21 @@ object CrashScoreCalculator {
 
         // 4. Minimal intelligence (3 rules)
         
-        // (1) Weak event suppression
+        // Rule (1): Weak event suppression
         if (nAccel < 0.3f && nGyro < 0.3f && features.deltaV < 5.0f) {
             val before = baseScore
             baseScore *= 0.6f
             bonusWeak = baseScore - before
         }
 
-        // (2) Falling pattern: Low-G + pressure drop
+        // Rule (2): Falling pattern (Low-G + pressure drop)
         if (features.lowG && features.pressureDrop) {
             val before = baseScore
             baseScore += 0.10f
             bonusFall = 0.10f
         }
 
-        // (3) Strong impact: High G + (Rotation OR large DeltaV)
+        // Rule (3): Strong impact (High G + [Rotation OR large DeltaV])
         if (nAccel > 0.6f && (nGyro > 0.4f || nSpeedRaw > 0.5f)) {
             val before = baseScore
             baseScore += 0.15f

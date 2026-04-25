@@ -40,6 +40,9 @@ class SettingsRepository(private val context: Context) {
 
         // v27.4
         val IS_TELEMETRY_LOGGING_ENABLED = booleanPreferencesKey("is_telemetry_logging_enabled")
+
+        // Crash-Recovery (v28.6.5)
+        val MONITORING_STATE = stringPreferencesKey("monitoring_state")
     }
 
     val settingsFlow: Flow<WatchSettings> = context.dataStore.data.map { prefs ->
@@ -85,6 +88,16 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.IS_CALL_ENABLED] = settings.isCallEnabled
             prefs[Keys.CALL_RECIPIENT] = settings.callRecipient
             prefs[Keys.IS_TELEMETRY_LOGGING_ENABLED] = settings.isTelemetryLoggingEnabled
+        }
+    }
+
+    val monitoringStateFlow: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.MONITORING_STATE] ?: "IDLE"
+    }
+
+    suspend fun updateMonitoringState(state: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.MONITORING_STATE] = state
         }
     }
 }

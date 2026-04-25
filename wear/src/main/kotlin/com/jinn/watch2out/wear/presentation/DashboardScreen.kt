@@ -19,6 +19,7 @@ import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.foundation.lazy.AutoCenteringParams
 import androidx.wear.compose.material.*
 import com.jinn.watch2out.shared.model.GpsMode
+import com.jinn.watch2out.shared.model.SensorStatus
 import com.jinn.watch2out.shared.model.TelemetryState
 import com.jinn.watch2out.shared.model.VehicleInferenceState
 import java.util.Locale
@@ -56,7 +57,7 @@ fun DashboardScreen(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = String.format(Locale.getDefault(), "%.0f km/h", telemetry.gpsSpeed),
+                        text = String.format(Locale.getDefault(), "%.1f km/h", telemetry.gpsSpeed),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = if (isGpsStale) Color.Gray else Color.White,
@@ -67,6 +68,20 @@ fun DashboardScreen(
                         Box(modifier = Modifier.size(6.dp).background(Color.Red, CircleShape))
                     }
                 }
+                Text(
+                    text = formatSpeedReason(telemetry.speedReason),
+                    fontSize = 9.sp,
+                    color = Color.Gray,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "GPS: ${telemetry.gpsStatusText}",
+                    fontSize = 9.sp,
+                    color = Color.Gray,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium
+                )
             }
         }
 
@@ -122,16 +137,16 @@ fun DashboardScreen(
             ) {
                 GpsStatusMiniBox(
                     label = "WATCH",
-                    isActive = telemetry.isWatchGpsActive,
+                    statusText = telemetry.gpsStatusText,
+                    isActive = telemetry.gpsStatus == SensorStatus.FIX_3D || telemetry.gpsStatus == SensorStatus.LOW_ACC,
                     isPrimary = telemetry.activeGpsSource == GpsMode.WATCH_ONLY,
-                    accuracy = telemetry.watchGpsAccuracy,
                     modifier = Modifier.weight(1f)
                 )
                 GpsStatusMiniBox(
                     label = "PHONE",
+                    statusText = if (telemetry.isPhoneGpsActive) "${telemetry.phoneGpsAccuracy.toInt()}m" else "OFF",
                     isActive = telemetry.isPhoneGpsActive,
                     isPrimary = telemetry.activeGpsSource == GpsMode.PHONE_PRIMARY,
-                    accuracy = telemetry.phoneGpsAccuracy,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -160,10 +175,23 @@ fun DashboardScreen(
 }
 
 @Composable
-private fun GpsStatusMiniBox(label: String, isActive: Boolean, isPrimary: Boolean, accuracy: Float, modifier: Modifier = Modifier) {
-    val borderColor = if (isPrimary) Color(0xFF42A5F5) else if (isActive) Color(0xFF4CAF50) else Color.DarkGray
-    val bgColor = if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.15f) else Color.Transparent
+private fun GpsStatusMiniBox(label: String, statusText: String, isActive: Boolean, isPrimary: Boolean, modifier: Modifier = Modifier) {
+    val isPhoneReserved = label.contains("PHONE") // On Wear, if it's phone, it's always reserved in this policy
+    val borderColor = if (isPhoneReserved) Color.Gray 
+                      else if (isPrimary) Color(0xFF42A5F5) 
+                      else if (isActive) Color(0xFF4CAF50) 
+                      else Color.DarkGray
+    val bgColor = if (isPhoneReserved) Color.Black
+                  else if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.15f) 
+                  else Color.Transparent
     
+    val displayStatus = when {
+        isPhoneReserved -> "RES"
+        statusText == "Searching" -> "SRCH"
+        statusText == "Unavailable" -> "OFF"
+        else -> statusText
+    }
+
     Column(
         modifier = modifier
             .border(1.dp, borderColor, RoundedCornerShape(4.dp))
@@ -171,14 +199,14 @@ private fun GpsStatusMiniBox(label: String, isActive: Boolean, isPrimary: Boolea
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(label, fontSize = 7.sp, color = if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
+        Text(label, fontSize = 7.sp, color = if (isPhoneReserved) Color.Gray else if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(4.dp).background(if (isActive) Color.Green else Color.Red, CircleShape))
+            Box(modifier = Modifier.size(4.dp).background(if (isPhoneReserved) Color.Gray else if (isActive) Color.Green else if (statusText == "Searching") Color.Yellow else Color.Red, CircleShape))
             Spacer(Modifier.width(2.dp))
             Text(
-                text = if (isActive) "${accuracy.toInt()}m" else "OFF",
+                text = displayStatus.uppercase(),
                 fontSize = 9.sp,
-                color = if (isActive) Color.White else Color.Gray,
+                color = if (isPhoneReserved || (!isActive && statusText != "Searching")) Color.Gray else Color.White,
                 fontWeight = FontWeight.Black,
                 fontFamily = FontFamily.Monospace
             )
@@ -198,6 +226,29 @@ private fun SmallMetric(label: String, value: String, valueColor: Color = Color.
 @Composable
 private fun HorizontalDivider() {
     Spacer(modifier = Modifier.fillMaxWidth(0.6f).height(1.dp).background(Color.DarkGray))
+}
+
+private fun formatGpsReason(reason: String): String {
+    return when (reason) {
+        "FIX" -> "Fix"
+        "NO_FIX" -> "No Fix"
+        "STALE" -> "Stale"
+        "GPS_OFF" -> "OFF"
+        else -> reason
+    }
+}
+
+private fun formatSpeedReason(reason: String): String {
+    return when (reason) {
+        "ZERO_BY_STATIONARY" -> "Stationary"
+        "ZERO_BY_LOW_CONFIDENCE" -> "Low confidence"
+        "ZERO_BY_ACCURACY" -> "Poor GPS"
+        "PASS_THROUGH" -> "Live"
+        "SPIKE_SUPPRESSED" -> "Spike suppressed"
+        "STALL_DECAY" -> "Stall decay"
+        "RAW" -> "Raw GPS"
+        else -> reason
+    }
 }
 
 private fun getScoreColor(score: Float): Color {

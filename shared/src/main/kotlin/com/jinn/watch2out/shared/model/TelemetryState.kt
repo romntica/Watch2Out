@@ -109,5 +109,69 @@ data class TelemetryState(
     val wPressureDelta: Float = 0f,
     val wMaxLongitudinalG: Float = 0f,
     val wMaxLateralG: Float = 0f,
-    val wMaxSpeedDrop: Float = 0f
+    val wMaxSpeedDrop: Float = 0f,
+
+    // Phase 5: Diagnostics (v28.2)
+    val hbAgeMs: Long = 0L,           // Watch-side: elapsed time since last Heartbeat
+    val gpsAgeMs: Long = 0L,          // Phone-side: elapsed time since last location generation
+    val isHintReliable: Boolean = false, // Result of PhoneGpsManager's final judgment
+    val offlineReason: String = "",    // Reason for switching to OFFLINE status
+    
+    // Detailed GPS Diagnostics (v28.3)
+    val gpsProviderEnabled: Boolean = false,
+    val gnssSignalSeen: Boolean = false,
+    val lastLocationReceivedAt: Long = 0L,
+    val watchGpsAgeMs: Long = 0L,
+    val lastLat: Double = 0.0,
+    val lastLon: Double = 0.0,
+    val lastSpeedMps: Float = 0f,
+    val lastAccuracyM: Float = 0f,
+    val gpsUiReason: String = "CALLBACK_MISSING", // GPS_OFF, NO_FIX_YET, STALE, CALLBACK_MISSING, ACTIVE
+    
+    val displacementM: Float = 0f,
+    val stationaryGateApplied: Boolean = false,
+    val speedReason: String = "RAW", // RAW, ZERO_BY_STATIONARY, ZERO_BY_ACCURACY, ZERO_BY_LOW_CONFIDENCE, PASS_THROUGH, STALL_DECAY, SPIKE_SUPPRESSED
+    
+    // Battery & CPU Diagnostics (v28.3)
+    val batteryLevel: Int = -1,
+    val batteryChangePerHour: Float = 0f,
+    val cpuUsage: Float = 0f,
+
+    // Phase 6: Spike & Stall Management (v28.5)
+    val speedRawKmh: Float = 0f,
+    val imuMotionState: String = "UNKNOWN", // STATIONARY, ACTIVE_LOW, ACTIVE_HIGH
+    val anomalyType: String = "NONE", // NONE, INDOOR_SPIKE, DRIFT_SPIKE, BEARING_ANOMALY, REAL_EVENT_CONFIRMED
+    val isStalled: Boolean = false,
+    val spikeSuppressed: Boolean = false,
+    val stallAgeMs: Long = 0L,
+    val recentAvgSpeedKmh: Float = 0f,
+    val satelliteCount: Int = 0,
+    val bearingChangeDeg: Float = 0f,
+    val decisionReason: String = "INITIALIZING",
+
+    // Phase 6b: Enhanced Anomaly Diagnostics (v28.5)
+    val gpsConfidence: Float = 1.0f,          // 0.0 - 1.0 based on accuracy/age/satellites
+    val callbackContinuityScore: Float = 1.0f, // 0.0 - 1.0 based on timing consistency
+    val realEventConfidence: Float = 0f,       // 0.0 - 1.0 based on IMU ACTIVE_HIGH intensity
+    val displayDecisionPath: String = "NONE",  // Detailed trace of speed logic decision
+
+    // Phase 6c: Diagnostic Weights (v28.5)
+    val currentGpsWeight: Float = 0f,
+    val currentImuWeight: Float = 0f,
+    val continuityWeight: Float = 0f,
+    val displacementWeight: Float = 0f,
+    val bearingWeight: Float = 0f,
+
+    // Phase 7: Sync & Indicator Diagnostics (v28.6)
+    val accelStatus: SensorStatus = SensorStatus.UNKNOWN,
+    val gyroStatus: SensorStatus = SensorStatus.UNKNOWN,
+    val pressureStatus: SensorStatus = SensorStatus.UNKNOWN,
+    val rotationStatus: SensorStatus = SensorStatus.UNKNOWN,
+    val syncLagMs: Long = 0L,
+    val wearTimestamp: Long = 0L,
+    val syncReason: String = "PERIODIC",
+    
+    // GPS UI Status Mapping (v28.6.1)
+    val gpsStatus: SensorStatus = SensorStatus.UNKNOWN,
+    val gpsStatusText: String = "Unavailable"
 )

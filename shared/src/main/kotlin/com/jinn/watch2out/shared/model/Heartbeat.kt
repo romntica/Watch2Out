@@ -25,7 +25,8 @@ data class Heartbeat(
      */
     val isSpeedHintReliable: Boolean = false,
     
-    val speedZone: Int? = null  // 0: 0-12, 1: 12-32, 2: 32-82, 3: 82+ km/h
+    val speedZone: Int? = null,  // 0: 0-12, 1: 12-32, 2: 32-82, 3: 82+ km/h
+    val elapsedMs: Long = 0L     // Time since last GPS fix on phone
 ) {
     /**
      * Determines the adaptive sampling interval based on the current speed zone.
