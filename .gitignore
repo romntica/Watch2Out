@@ -17,3 +17,9 @@ local.properties
 # Project exclude paths
 /shared/build/
 /wear/build/
+
+# AI Agent Artifacts
+.artifacts/
+*.artifact.md
+*.artifact.cmd
+planningMode.xml

@@ -1,8 +1,10 @@
 // [Module: :app]
 package com.jinn.watch2out.presentation
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -12,12 +14,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jinn.watch2out.shared.model.SimulationDetectionMode
 import com.jinn.watch2out.shared.model.WatchSettings
+import com.jinn.watch2out.shared.network.ProtocolContract
 import java.util.Locale
 import kotlin.math.abs
 
@@ -32,10 +36,10 @@ fun SettingsScreen(
     isConnected: Boolean,
     onApply: (WatchSettings) -> Unit,
     onCancel: () -> Unit,
-    onSimulatePreset: (String) -> Unit,
-    onInjectCustomData: (Float, Float, Float, Float, Float, Float) -> Unit
+    onInjectCustomData: (Float, Float, Float, Float, Float, Float, Float, Float) -> Unit
 ) {
     val scrollState = rememberScrollState()
+    val context = LocalContext.current
     
     // 1. Core Sensor Thresholds
     var accelThreshold: Float by remember { mutableFloatStateOf(currentSettings.accelThresholdG) }
@@ -80,6 +84,8 @@ fun SettingsScreen(
     var rawAccelY: String by remember { mutableStateOf("0.0") }
     var rawAccelZ: String by remember { mutableStateOf("9.8") }
     var rawGyroX: String by remember { mutableStateOf("0.0") }
+    var rawGyroY: String by remember { mutableStateOf("0.0") }
+    var rawGyroZ: String by remember { mutableStateOf("0.0") }
     var rawSpeed: String by remember { mutableStateOf("20.0") }
     var rawPressure: String by remember { mutableStateOf("1013.25") }
 
@@ -107,6 +113,56 @@ fun SettingsScreen(
             }
             "Technical" -> {
                 wAccel = 0.20f; wSpeed = 0.10f; wGyro = 0.30f; wPress = 0.10f; wStill = 0.10f; wRoll = 0.20f
+            }
+        }
+    }
+
+    fun applyScenarioToFields(path: String) {
+        when (path) {
+            ProtocolContract.Paths.SIMULATE_HARD_BRAKE -> {
+                rawAccelX = "0.0"; rawAccelY = "-12.0"; rawAccelZ = "9.8"
+                rawGyroX = "0.0"; rawGyroY = "0.0"; rawGyroZ = "0.0"
+                rawSpeed = "15.0"; rawPressure = "1013.25"
+            }
+            ProtocolContract.Paths.SIMULATE_FRONTAL -> {
+                rawAccelX = "0.0"; rawAccelY = "-147.0"; rawAccelZ = "19.6"
+                rawGyroX = "0.0"; rawGyroY = "0.0"; rawGyroZ = "0.0"
+                rawSpeed = "1.5"; rawPressure = "1013.25"
+            }
+            ProtocolContract.Paths.SIMULATE_REAR -> {
+                rawAccelX = "0.0"; rawAccelY = "58.8"; rawAccelZ = "9.8"
+                rawGyroX = "0.0"; rawGyroY = "0.0"; rawGyroZ = "0.0"
+                rawSpeed = "11.1"; rawPressure = "1013.25"
+            }
+            ProtocolContract.Paths.SIMULATE_SIDE -> {
+                rawAccelX = "14.7"; rawAccelY = "0.0"; rawAccelZ = "9.8"
+                rawGyroX = "0.0"; rawGyroY = "34.0"; rawGyroZ = "0.0"
+                rawSpeed = "6.9"; rawPressure = "1013.25"
+            }
+            ProtocolContract.Paths.SIMULATE_ROLLOVER -> {
+                rawAccelX = "39.2"; rawAccelY = "29.4"; rawAccelZ = "-19.6"
+                rawGyroX = "286.0"; rawGyroY = "150.0"; rawGyroZ = "50.0"
+                rawSpeed = "4.2"; rawPressure = "1013.25"
+            }
+            ProtocolContract.Paths.SIMULATE_PLUNGE -> {
+                rawAccelX = "0.0"; rawAccelY = "0.0"; rawAccelZ = "0.0"
+                rawGyroX = "0.0"; rawGyroY = "0.0"; rawGyroZ = "0.0"
+                rawSpeed = "12.5"; rawPressure = "1010.0"
+            }
+            ProtocolContract.Paths.SIMULATE_RANDOM -> {
+                rawAccelX = "12.5"; rawAccelY = "-8.4"; rawAccelZ = "14.2"
+                rawGyroX = "15.0"; rawGyroY = "5.0"; rawGyroZ = "-10.0"
+                rawSpeed = "5.0"; rawPressure = "1013.25"
+            }
+            "CLEAR" -> {
+                rawAccelX = "0.0"
+                rawAccelY = "0.0"
+                rawAccelZ = "9.8"
+                rawGyroX = "0.0"
+                rawGyroY = "0.0"
+                rawGyroZ = "0.0"
+                rawSpeed = "0.0"
+                rawPressure = "1013.25"
             }
         }
     }
@@ -192,24 +248,20 @@ fun SettingsScreen(
                 SwitchPreference("Enable Simulation Mode", "Allows manual data injection", simulationMode, { simulationMode = it }, isConnected)
                 
                 if (simulationMode) {
-                    Text("Quick Presets", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBC02D))
+                    Text("Scenario-Based Replay (v28.6)", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFBC02D))
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        PresetButton("Frontal") {
-                            rawAccelX = "0.0"; rawAccelY = "-80.0"; rawAccelZ = "0.0"; rawGyroX = "0.0"; rawSpeed = "20.0"; rawPressure = "1000.0"
-                        }
-                        PresetButton("Rear") {
-                            rawAccelX = "0.0"; rawAccelY = "30.0"; rawAccelZ = "0.0"; rawGyroX = "5.0"; rawSpeed = "0.5"; rawPressure = "1000.0"
-                        }
-                        PresetButton("Side") {
-                            rawAccelX = "60.0"; rawAccelY = "0.0"; rawAccelZ = "0.0"; rawGyroX = "0.0"; rawSpeed = "15.0"; rawPressure = "1000.0"
-                        }
-                        PresetButton("Plunge") {
-                            rawAccelX = "0.0"; rawAccelY = "0.0"; rawAccelZ = "1.0"; rawGyroX = "0.0"; rawSpeed = "20.0"; rawPressure = "1000.0"
-                        }
+                        ScenarioButton("Hard Brake", Color(0xFF64B5F6)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_HARD_BRAKE) }
+                        ScenarioButton("Frontal", Color(0xFFEF5350)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_FRONTAL) }
+                        ScenarioButton("Rear Hit", Color(0xFFFFB74D)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_REAR) }
+                        ScenarioButton("Side Slam", Color(0xFFBA68C8)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_SIDE) }
+                        ScenarioButton("Rollover", Color(0xFFE57373)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_ROLLOVER) }
+                        ScenarioButton("Cliff Drop", Color(0xFF9575CD)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_PLUNGE) }
+                        ScenarioButton("Random", Color(0xFF4DB6AC)) { applyScenarioToFields(ProtocolContract.Paths.SIMULATE_RANDOM) }
+                        ScenarioButton("CLEAR", Color.Gray) { applyScenarioToFields("CLEAR") }
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -221,9 +273,13 @@ fun SettingsScreen(
                         RawInputField("Accel Z", rawAccelZ, { rawAccelZ = it }, Modifier.weight(1f))
                     }
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        RawInputField("Pitch Rate", rawGyroX, { rawGyroX = it }, Modifier.weight(1f))
-                        RawInputField("Speed m/s", rawSpeed, { rawSpeed = it }, Modifier.weight(1f))
-                        RawInputField("Press hPa", rawPressure, { rawPressure = it }, Modifier.weight(1f))
+                        RawInputField("Gyro X", rawGyroX, { rawGyroX = it }, Modifier.weight(1f))
+                        RawInputField("Gyro Y", rawGyroY, { rawGyroY = it }, Modifier.weight(1f))
+                        RawInputField("Gyro Z", rawGyroZ, { rawGyroZ = it }, Modifier.weight(1f))
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RawInputField("Speed Km/h", rawSpeed, { rawSpeed = it }, Modifier.weight(1f))
+                        RawInputField("Press hPa", rawPressure, { rawPressure = it }, Modifier.weight(2f))
                     }
 
                     Button(
@@ -232,9 +288,11 @@ fun SettingsScreen(
                             val ay: Float = rawAccelY.toFloatOrNull() ?: 0f
                             val az: Float = rawAccelZ.toFloatOrNull() ?: 9.8f
                             val gx: Float = rawGyroX.toFloatOrNull() ?: 0f
+                            val gy: Float = rawGyroY.toFloatOrNull() ?: 0f
+                            val gz: Float = rawGyroZ.toFloatOrNull() ?: 0f
                             val sp: Float = rawSpeed.toFloatOrNull() ?: 0f
                             val pr: Float = rawPressure.toFloatOrNull() ?: 1013.25f
-                            onInjectCustomData(ax, ay, az, gx, sp, pr)
+                            onInjectCustomData(ax, ay, az, gx, gy, gz, sp, pr)
                         },
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF006064))
@@ -282,6 +340,19 @@ fun SettingsScreen(
                 ) { Text("SAVE & APPLY") }
             }
         }
+    }
+}
+
+@Composable
+fun ScenarioButton(label: String, color: Color, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier.height(36.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = color),
+        shape = RoundedCornerShape(4.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+    ) {
+        Text(label, fontSize = 11.sp, color = Color.Black, fontWeight = FontWeight.Bold)
     }
 }
 

@@ -3,7 +3,26 @@
 **Watch² Out** is a robust, safety-critical accident detection system for **Wear OS**, inspired by high-end crash detection algorithms. It monitors for **Vehicle Crashes (High-G)** and **Human Falls (Low-G)** in real-time.
 However, this is an experimental attempt. **NEVER TRUST** this app for real safety.
 
-## 🚀 Recent Core Enhancements (v1.4 / FSM v28.6)
+## 🚀 Recent Core Enhancements (v1.5 / FSM v32.0)
+
+### 🛡️ Fail-Safe Data Delivery (v32.0)
+*   **Disk-Based Persistence**: Critical EDR reports and audio evidence are now automatically saved to a local "Fail-Safe Store" if immediate transfer to the phone fails.
+*   **Background Retry Engine**: A dedicated service periodically re-attempts transfers every 5 minutes and upon reconnection, ensuring 100% reliability for important incident data.
+*   **Optimized Transfer Flow**: Decoupled EDR from Audio. The full JSON report is sent **instantly** when an alert starts, while the audio follows as secondary evidence.
+
+### 🛡️ Robust FSM with Memory (v32.0)
+*   **Peak-Score Memory**: The State Machine now "remembers" the maximum severity reached during a tumble or rollover, ensuring the alert triggers correctly once the vehicle reaches stillness.
+*   **Hysteresis Latching**: Added stability logic to the `PRE_EVENT` state to prevent "state bounce" during complex multi-impact scenarios.
+*   **Centralized Logic**: Detection physics are now unified in the `:shared` module, guaranteeing identical behavior across all deployment platforms.
+
+### 🚨 High-Intensity Alerting
+*   **Visual Warning**: Upgraded to a high-contrast **Pure Red** blinking UI for maximum visibility in stressful situations.
+*   **Haptic Feedback**: Replaced standard vibration with an aggressive **double-pulse pattern** that repeats throughout the countdown window.
+
+### 📁 Advanced EDR Formatting
+*   **Readable Timestamps**: Added dual-format timestamps (`t` for machine math, `time` for human inspection) to every telemetry point: `CCYYMMDD-HH:MM:SS:MSEC`.
+*   **Pretty Printing**: All JSON logs are now exported with indentation and whitespace for professional readability.
+*   **Synchronized Evidence**: Audio recordings share exact timestamps with sensor data files for easy correlation.
 
 ### 🛡️ Crash-Recovery & Survival (v28.6.5)
 *   **Self-Healing "Guardian"**: Added background logic to automatically resume monitoring if the `SentinelService` is killed by the system.
@@ -77,7 +96,7 @@ stateDiagram-v2
 
 ### ⌚ Wear OS Sentinel (`:wear`)
 *   **Automated Diagnostics**: Self-detects GPS, Mic, and Telephony capabilities.
-*   **EDR (Blackbox)**: Persistent recording of 10s audio and high-fidelity sensor data in `/Download/watch2out`.
+*   **EDR (Blackbox)**: Persistent recording of 25s audio (15s alarm + 10s post-event) and high-fidelity sensor data.
 *   **Survival Logic**: Redundant alert dispatching through both local LTE and mobile relay.
 *   **Indicator**: A(Accelerometer), G(Gyroscope), P(Pressure), R(Rotation Vector), L(Location/GPS), M(Microphone), T(Telephony/SMS)
 

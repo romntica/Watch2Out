@@ -22,11 +22,13 @@ object ProtocolContract {
         const val DASHBOARD_STOP = "$BASE/dashboard/stop"
         
         // Simulation Commands
+        const val SIMULATE_HARD_BRAKE = "$BASE/sim/hard_brake"
         const val SIMULATE_FRONTAL = "$BASE/sim/frontal"
         const val SIMULATE_REAR = "$BASE/sim/rear"
         const val SIMULATE_SIDE = "$BASE/sim/side"
         const val SIMULATE_ROLLOVER = "$BASE/sim/rollover"
         const val SIMULATE_PLUNGE = "$BASE/sim/plunge"
+        const val SIMULATE_RANDOM = "$BASE/sim/random"
         const val INJECT_CUSTOM_SENSOR = "$BASE/sim/inject_custom"
         
         // Data Synchronization

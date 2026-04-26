@@ -168,11 +168,13 @@ class WatchMessageService : WearableListenerService() {
                     sendImmediateSensorStatus()
                 }
 
+                ProtocolContract.Paths.SIMULATE_HARD_BRAKE,
                 ProtocolContract.Paths.SIMULATE_FRONTAL,
                 ProtocolContract.Paths.SIMULATE_REAR,
                 ProtocolContract.Paths.SIMULATE_SIDE,
                 ProtocolContract.Paths.SIMULATE_ROLLOVER,
-                ProtocolContract.Paths.SIMULATE_PLUNGE -> {
+                ProtocolContract.Paths.SIMULATE_PLUNGE,
+                ProtocolContract.Paths.SIMULATE_RANDOM -> {
                     val intent = Intent(applicationContext, SentinelService::class.java).apply {
                         action = SentinelService.ACTION_SIMULATE
                         putExtra("path", path)
@@ -186,7 +188,7 @@ class WatchMessageService : WearableListenerService() {
                         action = SentinelService.ACTION_INJECT_DATA
                         putExtra("csv", csv)
                     }
-                    startService(intent)
+                    startForegroundService(intent)
                 }
             }
         }

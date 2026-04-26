@@ -137,10 +137,11 @@ object CrashScoreCalculator {
         }
 
         // Rule (3): Strong impact (High G + [Rotation OR large DeltaV])
-        if (nAccel > 0.6f && (nGyro > 0.4f || nSpeedRaw > 0.5f)) {
-            val before = baseScore
-            baseScore += 0.15f
-            bonusImpact = 0.15f
+        // v31.0: Lowered thresholds and increased boost for sensor fusion events
+        if (nAccel > 0.3f && (nGyro > 0.4f || nSpeedRaw > 0.4f)) {
+            val boost = 0.30f
+            baseScore += boost
+            bonusImpact = boost
         }
 
         val finalScore = clamp(baseScore)

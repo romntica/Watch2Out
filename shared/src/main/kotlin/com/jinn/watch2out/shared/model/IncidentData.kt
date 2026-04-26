@@ -22,6 +22,7 @@ data class IncidentData(
 
 @Serializable
 data class TelemetryPoint(
+    val time: String = "", // Readable timestamp (CCYYMMDD-HH:MM:SS:MSEC)
     val t: Long,      // Absolute timestamp in ms (Wall clock)
     val offset: Long, // Offset in ms relative to impact
     val ax: Float,    // Accel X (g)
@@ -31,5 +32,12 @@ data class TelemetryPoint(
     val gy: Float,    // Gyro Y (deg/s)
     val gz: Float,    // Gyro Z (deg/s)
     val spd: Float,   // GPS Speed (km/h)
-    val mag: Float    // RMS Magnitude (g)
+    val mag: Float,   // RMS Magnitude (g)
+    val pres: Float = 0f, // Pressure (hPa)
+    val rx: Float = 0f,   // Rotation Vector X
+    val ry: Float = 0f,   // Rotation Vector Y
+    val rz: Float = 0f,   // Rotation Vector Z
+    val rw: Float = 1f,   // Rotation Vector W
+    val lat: Double? = null,
+    val lon: Double? = null
 )

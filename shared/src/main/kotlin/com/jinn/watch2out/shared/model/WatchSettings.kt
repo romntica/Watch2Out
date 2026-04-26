@@ -29,8 +29,8 @@ data class EmergencyContact(
  */
 @Serializable
 data class WatchSettings(
-    // 1. Accel Threshold: 8G ~ 20G (Default 10G)
-    val accelThresholdG: Float = 10.0f,
+    // 1. Accel Threshold: 8G ~ 20G (Default 8G)
+    val accelThresholdG: Float = 8.0f,
     // 2. Gyro Threshold: 100 ~ 500°/s (Default 200°/s)
     val gyroThresholdDeg: Float = 200.0f,
     // 3. Baro Threshold: 1.0 ~ 5.0hPa (Default 2.5hPa)
@@ -39,12 +39,10 @@ data class WatchSettings(
     val speedDeltaKmh: Float = 20.0f,
     // 5. Stillness Duration: 3 ~ 15s (Default 8s)
     val stillnessDurationMs: Long = 8000L,
-    // 6. Crash Score: 0.5 ~ 0.9 (Default 0.7)
-    val crashScoreThreshold: Float = 0.7f,
 
     // --- CrashScore v27 Specific ---
-    val accelMinG: Float = 5.0f,
-    val accelMaxG: Float = 15.0f,
+    val accelMinG: Float = 2.5f,
+    val accelMaxG: Float = 12.0f,
     val speedMinKmh: Float = 20.0f,
     val speedDeltaMaxKmh: Float = 40.0f,
     val gyroMaxDegPerSec: Float = 500.0f,
@@ -81,6 +79,7 @@ data class WatchSettings(
     val impactDeltaVThresholdKmh: Float = 15.0f, // PRE_EVENT -> IMPACT (DeltaV component)
     val impactRotationThresholdDeg: Float = 200.0f, // PRE_EVENT -> IMPACT (Rotation component)
     val alertTimeoutMs: Long = 15000L, // WAIT_CONFIRM -> CONFIRMED_CRASH (Timeout 15s)
+    val crashScoreThreshold: Float = 0.60f,
 
     // Dynamic Adaptive Sampling Thresholds (from AGENTS.md)
     val highSpeedThresholdKmh: Float = 80.0f, // 80+ km/h (50-100ms interval)

@@ -14,10 +14,8 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
@@ -95,16 +93,14 @@ class IncidentAlertActivity : ComponentActivity() {
             var cancelCountdown by remember { mutableIntStateOf(7) }
 
             // Background flashing
-            var isRedColor by remember { mutableStateOf(true) }
-            LaunchedEffect(Unit) {
-                while (true) {
-                    isRedColor = !isRedColor
-                    delay(500)
-                }
-            }
-            val backgroundColor by animateColorAsState(
-                targetValue = if (isRedColor) Color(0xFF660000) else Color.Black,
-                animationSpec = infiniteRepeatable(animation = tween(500), repeatMode = RepeatMode.Reverse),
+            val infiniteTransition = rememberInfiniteTransition(label = "Blink")
+            val backgroundColor by infiniteTransition.animateColor(
+                initialValue = Color.Black,
+                targetValue = Color.Red,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(500),
+                    repeatMode = RepeatMode.Reverse
+                ),
                 label = "Blink"
             )
 
@@ -112,7 +108,7 @@ class IncidentAlertActivity : ComponentActivity() {
             LaunchedEffect(uiState) {
                 if (uiState == UIState.ALERTING) {
                     while (countdown > 0) {
-                        vibrator.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
+                        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 100, 400), -1))
                         delay(1000)
                         countdown--
                     }

@@ -121,16 +121,13 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
             ProtocolContract.Paths.DASHBOARD_STOP -> {
                 startService(Intent(this, SentinelService::class.java).apply { action = SentinelService.ACTION_DASHBOARD_STOP })
             }
+            ProtocolContract.Paths.SIMULATE_HARD_BRAKE,
             ProtocolContract.Paths.SIMULATE_FRONTAL,
             ProtocolContract.Paths.SIMULATE_REAR,
             ProtocolContract.Paths.SIMULATE_SIDE,
             ProtocolContract.Paths.SIMULATE_ROLLOVER,
             ProtocolContract.Paths.SIMULATE_PLUNGE -> {
                 sentinelServiceState.value?.simulateIncident(path)
-            }
-            ProtocolContract.Paths.INJECT_CUSTOM_SENSOR -> {
-                val csv = String(messageEvent.data)
-                sentinelServiceState.value?.injectCustomSensorData(csv)
             }
             ProtocolContract.Paths.INCIDENT_ALERT_DISMISS -> {
                 startService(Intent(this, SentinelService::class.java).apply { action = SentinelService.ACTION_DISMISS_INCIDENT })

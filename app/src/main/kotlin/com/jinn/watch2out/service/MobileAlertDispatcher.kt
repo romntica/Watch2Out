@@ -28,7 +28,8 @@ class MobileAlertDispatcher(private val context: Context) {
         speed: Float
     ) {
         // Critical: Always log entry at Warning level to confirm dispatcher was reached
-        Log.w(TAG, "🔔 EMERGENCY DISPATCH TRIGGERED! SMS: ${settings.isSmsEnabled}")
+        val isSimulation = type.contains("SIMULATION", ignoreCase = true)
+        Log.w(TAG, "🔔 EMERGENCY DISPATCH TRIGGERED! (Simulation: $isSimulation) SMS: ${settings.isSmsEnabled}")
 
         // 1. Legacy SMS Dispatch
         if (settings.isSmsEnabled && settings.smsRecipient.isNotEmpty()) {

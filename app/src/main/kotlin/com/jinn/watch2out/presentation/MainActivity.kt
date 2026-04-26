@@ -183,8 +183,7 @@ class MainActivity : ComponentActivity(),
                                     isConnected = isConnectedState.value,
                                     onApply = { settings -> sendSettings(settings); currentScreen = Screen.Main },
                                     onCancel = { currentScreen = Screen.Main },
-                                    onSimulatePreset = { path -> sendRemoteCommand(path) },
-                                    onInjectCustomData = { ax, ay, az, gx, sp, pr -> injectCustomSensor(ax, ay, az, gx, sp, pr) }
+                                    onInjectCustomData = { ax, ay, az, gx, gy, gz, sp, pr -> injectCustomSensor(ax, ay, az, gx, gy, gz, sp, pr) }
                                 )
                             }
                         }
@@ -236,6 +235,9 @@ class MainActivity : ComponentActivity(),
 
     private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
         if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true) startLocationUpdates()
+        if (permissions[Manifest.permission.SEND_SMS] == false) {
+            Log.e("SentinelApp", "SMS Permission Denied. Emergency dispatch will fail.")
+        }
     }
 
     private fun startLocationUpdates() {
@@ -243,8 +245,14 @@ class MainActivity : ComponentActivity(),
             Log.d("SentinelApp", "Location updates disabled: PhoneGpsManager is in RESERVED_MODE (Watch Only Policy)")
             return
         }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.SEND_SMS)
+        }
+        
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissionLauncher.launch(permissions.toTypedArray())
             return
         }
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L).build()
@@ -320,10 +328,10 @@ class MainActivity : ComponentActivity(),
         alertDispatcher.dispatch(watchSettingsState.value, reason, timestamp, lat, lon, maxG, speed)
     }
 
-    private fun injectCustomSensor(ax: Float, ay: Float, az: Float, gx: Float, sp: Float, pr: Float) {
+    private fun injectCustomSensor(ax: Float, ay: Float, az: Float, gx: Float, gy: Float, gz: Float, sp: Float, pr: Float) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val csvData = "$ax,$ay,$az,$gx,$sp,$pr"
+                val csvData = "$ax,$ay,$az,$gx,$gy,$gz,$sp,$pr"
                 val nodes = Wearable.getNodeClient(this@MainActivity).connectedNodes.await()
                 for (node in nodes) {
                     Wearable.getMessageClient(this@MainActivity).sendMessage(node.id, ProtocolContract.Paths.INJECT_CUSTOM_SENSOR, csvData.toByteArray()).await()

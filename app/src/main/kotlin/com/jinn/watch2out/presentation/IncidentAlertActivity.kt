@@ -13,10 +13,8 @@ import android.os.VibratorManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -81,15 +79,25 @@ class IncidentAlertActivity : ComponentActivity() {
             var uiState by remember { mutableStateOf(UIState.ALERTING) }
             var countdown by remember { mutableIntStateOf(15) }
             var cancelCountdown by remember { mutableIntStateOf(7) }
-            var isRedColor by remember { mutableStateOf(true) }
             
+            // Background flashing
+            val infiniteTransition = rememberInfiniteTransition(label = "Blink")
+            val backgroundColor by infiniteTransition.animateColor(
+                initialValue = Color.Black,
+                targetValue = Color.Red,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(500),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "Blink"
+            )
+
             LaunchedEffect(uiState) {
                 if (uiState == UIState.ALERTING) {
                     while (countdown > 0) {
-                        vibrator.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
+                        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 100, 400), -1))
                         delay(1000)
                         countdown--
-                        isRedColor = !isRedColor
                     }
                     triggerFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
                 } else {
@@ -100,12 +108,6 @@ class IncidentAlertActivity : ComponentActivity() {
                     triggerFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
                 }
             }
-
-            val backgroundColor by animateColorAsState(
-                targetValue = if (isRedColor) Color(0xFFB71C1C) else Color.Black,
-                animationSpec = infiniteRepeatable(animation = tween(500), repeatMode = RepeatMode.Reverse),
-                label = "Blink"
-            )
 
             Surface(modifier = Modifier.fillMaxSize(), color = backgroundColor) {
                 Column(

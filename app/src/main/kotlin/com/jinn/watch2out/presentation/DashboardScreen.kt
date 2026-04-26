@@ -85,7 +85,7 @@ fun DashboardScreen(
                 
                 SectionHeader("📊 LIVE FEED (Last Update: $lastUpdateStr)")
                 LiveFeedCard(telemetry)
-                SensorChartCard(telemetry.currentImpact)
+                SensorChartCard(telemetry)
 
                 if (showDebug) {
                     DebugTuningCard(telemetry)
@@ -521,36 +521,75 @@ private fun getWindowMs(window: String): Long {
 }
 
 @Composable
-fun SensorChartCard(currentImpact: Float) {
-    val entries = remember { mutableStateListOf<Entry>() }
+fun SensorChartCard(t: TelemetryState) {
+    val impactEntries = remember { mutableStateListOf<Entry>() }
+    val speedEntries = remember { mutableStateListOf<Entry>() }
+    val confEntries = remember { mutableStateListOf<Entry>() }
     var xCounter by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(currentImpact) {
-        if (!currentImpact.isNaN()) {
-            entries.add(Entry(xCounter, currentImpact))
+
+    LaunchedEffect(t.wearTimestamp) {
+        if (t.wearTimestamp > 0) {
+            impactEntries.add(Entry(xCounter, t.currentImpact))
+            speedEntries.add(Entry(xCounter, t.gpsSpeed / 20f)) // Scaled for visibility
+            confEntries.add(Entry(xCounter, t.sensorConfidence * 10f)) // 0-10 scale
+            
             xCounter += 1f
-            if (entries.size > 40) entries.removeAt(0)
+            if (impactEntries.size > 50) {
+                impactEntries.removeAt(0)
+                speedEntries.removeAt(0)
+                confEntries.removeAt(0)
+            }
         }
     }
-    Card(modifier = Modifier.fillMaxWidth().height(100.dp), colors = CardDefaults.cardColors(containerColor = Color.Black), shape = RoundedCornerShape(4.dp)) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize().padding(4.dp),
-            factory = { context ->
-                LineChart(context).apply {
-                    description.isEnabled = false; setTouchEnabled(false); legend.isEnabled = false
-                    xAxis.apply { position = XAxis.XAxisPosition.BOTTOM; setDrawGridLines(false); setDrawLabels(false); axisLineColor = android.graphics.Color.DKGRAY }
-                    axisLeft.apply { 
-                        setDrawGridLines(true); gridColor = android.graphics.Color.rgb(30, 30, 30); axisMinimum = 0f; axisMaximum = 10f; textColor = android.graphics.Color.GRAY; textSize = 8f
-                    }
-                    axisRight.isEnabled = false
-                }
-            },
-            update = { chart ->
-                val dataSet = LineDataSet(entries.toList(), "Impact").apply {
-                    color = Color.Cyan.toArgb()
-                    setDrawCircles(false); setDrawValues(false); lineWidth = 1.5f; mode = LineDataSet.Mode.CUBIC_BEZIER
-                }
-                chart.data = LineData(dataSet); chart.invalidate()
+
+    Card(
+        modifier = Modifier.fillMaxWidth().height(150.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Black),
+        shape = RoundedCornerShape(4.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color.DarkGray)
+    ) {
+        Column(modifier = Modifier.padding(4.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                LegendItem("Impact (G)", Color.Cyan)
+                LegendItem("Speed (x20)", Color.Green)
+                LegendItem("Confidence", Color.Yellow)
             }
-        )
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    LineChart(context).apply {
+                        description.isEnabled = false; setTouchEnabled(false); legend.isEnabled = false
+                        xAxis.apply { position = XAxis.XAxisPosition.BOTTOM; setDrawGridLines(false); setDrawLabels(false); axisLineColor = android.graphics.Color.DKGRAY }
+                        axisLeft.apply { 
+                            setDrawGridLines(true); gridColor = android.graphics.Color.rgb(30, 30, 30); axisMinimum = 0f; axisMaximum = 15f; textColor = android.graphics.Color.GRAY; textSize = 8f
+                        }
+                        axisRight.isEnabled = false
+                    }
+                },
+                update = { chart ->
+                    val dsImpact = LineDataSet(impactEntries.toList(), "Impact").apply {
+                        color = Color.Cyan.toArgb(); setDrawCircles(false); setDrawValues(false); lineWidth = 1.5f; mode = LineDataSet.Mode.CUBIC_BEZIER
+                    }
+                    val dsSpeed = LineDataSet(speedEntries.toList(), "Speed").apply {
+                        color = Color.Green.toArgb(); setDrawCircles(false); setDrawValues(false); lineWidth = 1f; mode = LineDataSet.Mode.CUBIC_BEZIER
+                    }
+                    val dsConf = LineDataSet(confEntries.toList(), "Conf").apply {
+                        color = Color.Yellow.toArgb(); setDrawCircles(false); setDrawValues(false); lineWidth = 1f; setDrawFilled(true); fillColor = Color.Yellow.toArgb(); fillAlpha = 20
+                    }
+                    
+                    chart.data = LineData(dsImpact, dsSpeed, dsConf)
+                    chart.invalidate()
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun LegendItem(label: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.size(8.dp).background(color, CircleShape))
+        Spacer(Modifier.width(4.dp))
+        Text(label, color = Color.Gray, fontSize = 8.sp, fontWeight = FontWeight.Bold)
     }
 }

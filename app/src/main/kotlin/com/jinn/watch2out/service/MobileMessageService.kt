@@ -87,7 +87,13 @@ class MobileMessageService : WearableListenerService() {
             val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "watch2out")
             if (!dir.exists()) dir.mkdirs()
             
-            val file = File(dir, "$fileName.aac")
+            // fileName now expected to contain extension (e.g., 20260426-135558-REC.aac)
+            val file = if (fileName.contains(".")) {
+                File(dir, fileName)
+            } else {
+                File(dir, "$fileName.aac")
+            }
+
             val inputStream = Wearable.getDataClient(this).getFdForAsset(asset).await().inputStream
             
             FileOutputStream(file).use { out ->
