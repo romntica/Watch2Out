@@ -87,5 +87,8 @@ data class WatchSettings(
     val lowSpeedThresholdKmh: Float = 10.0f, // 10-30 km/h (200ms interval)
 
     // --- Telemetry Logging (v27.4) ---
-    val isTelemetryLoggingEnabled: Boolean = false
+    val isTelemetryLoggingEnabled: Boolean = false,
+
+    // --- Phone Integration (v34.2) ---
+    val usePhoneGps: Boolean = true
 )

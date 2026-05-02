@@ -103,7 +103,7 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
             ProtocolContract.Paths.REQUEST_SETTINGS -> {
                 lifecycleScope.launch {
                     val currentSettings = settingsRepository.settingsFlow.first()
-                    syncSettingsToMobile(currentSettings)
+                    syncSettingsToMobileInternal(currentSettings)
                 }
             }
             ProtocolContract.Paths.START_MONITORING -> {
@@ -135,9 +135,9 @@ class MainActivity : ComponentActivity(), MessageClient.OnMessageReceivedListene
         }
     }
 
-    private suspend fun syncSettingsToMobile(settings: WatchSettings) {
+    internal suspend fun syncSettingsToMobileInternal(settings: WatchSettings) {
         try {
-            val settingsJson = Json.encodeToString(settings)
+            val settingsJson = ProtocolContract.protocolJson.encodeToString(settings)
             val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.SETTINGS_SYNC).apply {
                 dataMap.putString(ProtocolContract.Keys.SETTINGS_JSON, settingsJson)
                 dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
@@ -197,7 +197,11 @@ fun Watch2OutApp(repository: SettingsRepository, service: SentinelService?) {
                     SettingsScreen(
                         currentSettings = settings,
                         onApply = { newSettings ->
-                            coroutineScope.launch { repository.updateSettings(newSettings) }
+                            coroutineScope.launch { 
+                                repository.updateSettings(newSettings)
+                                // v34.3: Immediately broadcast to phone so it reflects the change
+                                (context as? MainActivity)?.syncSettingsToMobileInternal(newSettings)
+                            }
                             currentScreen = WearNavScreen.Main
                         },
                         onCancel = { currentScreen = WearNavScreen.Main },
@@ -289,9 +293,9 @@ fun MainScreen(
 fun FusionBadge(mode: GpsMode) {
     val (color, text) = when (mode) {
         GpsMode.PHONE_PRIMARY -> Color(0xFF42A5F5) to "FUSION (PHONE)"
-        GpsMode.WATCH_ONLY -> Color(0xFFFFA726) to "GPS ONLY"
-        GpsMode.WATCH_HYBRID -> Color(0xFF66BB6A) to "HYBRID (GPS+NET)"
-        GpsMode.WATCH_NETWORK_ONLY -> Color(0xFFEF5350) to "NET ONLY (FALLBACK)"
+        GpsMode.WATCH_ONLY -> Color(0xFFFFA726) to "WATCH ONLY"
+        GpsMode.WATCH_HYBRID -> Color(0xFF66BB6A) to "WATCH HYBRID"
+        GpsMode.WATCH_NETWORK_ONLY -> Color(0xFFEF5350) to "WATCH NET ONLY"
     }
     
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {

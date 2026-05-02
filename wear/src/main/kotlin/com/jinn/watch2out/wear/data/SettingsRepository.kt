@@ -41,6 +41,9 @@ class SettingsRepository(private val context: Context) {
         // v27.4
         val IS_TELEMETRY_LOGGING_ENABLED = booleanPreferencesKey("is_telemetry_logging_enabled")
 
+        // v34.2
+        val USE_PHONE_GPS = booleanPreferencesKey("use_phone_gps")
+
         // Crash-Recovery (v28.6.5)
         val MONITORING_STATE = stringPreferencesKey("monitoring_state")
     }
@@ -65,7 +68,8 @@ class SettingsRepository(private val context: Context) {
             smsRecipient = prefs[Keys.SMS_RECIPIENT] ?: "",
             isCallEnabled = prefs[Keys.IS_CALL_ENABLED] ?: false,
             callRecipient = prefs[Keys.CALL_RECIPIENT] ?: "",
-            isTelemetryLoggingEnabled = prefs[Keys.IS_TELEMETRY_LOGGING_ENABLED] ?: false
+            isTelemetryLoggingEnabled = prefs[Keys.IS_TELEMETRY_LOGGING_ENABLED] ?: false,
+            usePhoneGps = prefs[Keys.USE_PHONE_GPS] ?: true
         )
     }
 
@@ -88,6 +92,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.IS_CALL_ENABLED] = settings.isCallEnabled
             prefs[Keys.CALL_RECIPIENT] = settings.callRecipient
             prefs[Keys.IS_TELEMETRY_LOGGING_ENABLED] = settings.isTelemetryLoggingEnabled
+            prefs[Keys.USE_PHONE_GPS] = settings.usePhoneGps
         }
     }
 

@@ -78,6 +78,7 @@ fun SettingsScreen(
     var callRecipient: String by remember { mutableStateOf(currentSettings.callRecipient) }
     var useWatchDirectDispatch: Boolean by remember { mutableStateOf(currentSettings.useWatchDirectDispatch) }
     var isAutoStartEnabled: Boolean by remember { mutableStateOf(currentSettings.isAutoStartEnabled) }
+    var usePhoneGps: Boolean by remember { mutableStateOf(currentSettings.usePhoneGps) }
 
     // Custom Injection State
     var rawAccelX: String by remember { mutableStateOf("0.0") }
@@ -240,6 +241,7 @@ fun SettingsScreen(
             SettingsSection(title = "System & Policy", enabled = isConnected) {
                 SwitchPreference("Auto Start on Boot", "Automatically start monitoring on boot", isAutoStartEnabled, { isAutoStartEnabled = it }, isConnected)
                 SwitchPreference("Watch Direct Dispatch", "Watch sends SMS directly", useWatchDirectDispatch, { useWatchDirectDispatch = it }, isConnected)
+                SwitchPreference("Use Phone GPS (Hybrid)", "Integrate Phone GPS for better accuracy", usePhoneGps, { usePhoneGps = it }, isConnected)
                 SwitchPreference("Telemetry Logging", "Periodically log sensing values for review", isTelemetryLoggingEnabled, { isTelemetryLoggingEnabled = it }, isConnected)
             }
 
@@ -332,6 +334,7 @@ fun SettingsScreen(
                             isTelemetryLoggingEnabled = isTelemetryLoggingEnabled,
                             isAutoStartEnabled = isAutoStartEnabled,
                             useWatchDirectDispatch = useWatchDirectDispatch,
+                            usePhoneGps = usePhoneGps,
                             isSmsEnabled = isSmsEnabled, smsRecipient = smsRecipient,
                             isCallEnabled = isCallEnabled, callRecipient = callRecipient
                         ))

@@ -301,9 +301,10 @@ fun LiveFeedCard(t: TelemetryState) {
                 GpsStatusBox(
                     label = "PHONE GPS",
                     statusText = when {
+                        !t.activeGpsSource.name.contains("PHONE") && t.activeGpsSource != GpsMode.PHONE_PRIMARY -> "OFF"
                         t.isPhoneGpsActive -> "±${t.phoneGpsAccuracy.toInt()}m"
                         t.offlineReason.isNotEmpty() -> t.offlineReason
-                        else -> "OFFLINE"
+                        else -> "SEARCHING"
                     },
                     isActive = t.isPhoneGpsActive,
                     isPrimary = t.activeGpsSource == GpsMode.PHONE_PRIMARY,

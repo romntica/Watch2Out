@@ -1,12 +1,24 @@
 // [Module: :shared]
 package com.jinn.watch2out.shared.network
 
+import kotlinx.serialization.json.Json
+
 /**
  * Defines the synchronization contract between Mobile and Wear modules.
  */
 object ProtocolContract {
     
     const val VERSION = 1
+
+    /**
+     * Standard JSON configuration for all protocol communications.
+     * v34.3: Added to ensure cross-module consistency (App vs Wear).
+     */
+    val protocolJson = Json {
+        allowSpecialFloatingPointValues = true
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
 
     object Paths {
         private const val BASE = "/watch2out/v$VERSION"

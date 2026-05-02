@@ -95,12 +95,6 @@ class MainActivity : ComponentActivity(),
 
     private var currentScreenState: Screen = Screen.Main
 
-    private val explicitJson = Json {
-        allowSpecialFloatingPointValues = true
-        ignoreUnknownKeys = true
-        encodeDefaults = true
-    }
-
     @Composable
     fun UpdateIndicatorsEffect() {
         LaunchedEffect(telemetryState.value, isWatchActiveState.value) {
@@ -248,7 +242,15 @@ class MainActivity : ComponentActivity(),
     }
 
     private fun startLocationUpdates(intervalMs: Long? = null) {
-        val interval = intervalMs ?: currentGpsIntervalMs
+        // v34.7: Balanced approach. 
+        // If Phone GPS is disabled, we still request location but at a VERY low frequency (15 min).
+        // This ensures our app doesn't "kill" its own access, and we have a last-known position for emergencies.
+        val interval = when {
+            !watchSettingsState.value.usePhoneGps -> 900000L // 15 Minutes (Power Save)
+            else -> intervalMs ?: currentGpsIntervalMs
+        }
+
+        if (interval == currentGpsIntervalMs && locationCallback != null) return
         if (interval == currentGpsIntervalMs && locationCallback != null) return
         
         currentGpsIntervalMs = interval
@@ -288,6 +290,8 @@ class MainActivity : ComponentActivity(),
 
     private fun syncHeartbeatToWatch(location: Location) {
         if (PhoneGpsManager.IS_RESERVED_MODE) return
+        // v34.7: If Phone GPS is disabled in settings, do not waste battery/bandwidth on BLE transmission
+        if (!watchSettingsState.value.usePhoneGps) return
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -308,7 +312,7 @@ class MainActivity : ComponentActivity(),
                 )
 
                 val nodes = Wearable.getNodeClient(this@MainActivity).connectedNodes.await()
-                val heartbeatJson = explicitJson.encodeToString(heartbeat)
+                val heartbeatJson = ProtocolContract.protocolJson.encodeToString(heartbeat)
                 
                 // Use DataClient for heartbeat sync to ensure all nodes receive it
                 val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.HEARTBEAT_SYNC).apply {
@@ -325,7 +329,7 @@ class MainActivity : ComponentActivity(),
         if (messageEvent.path == ProtocolContract.Paths.INCIDENT_ALERT_START) {
             try {
                 val json = String(messageEvent.data)
-                val incident = explicitJson.decodeFromString<IncidentData>(json)
+                val incident = ProtocolContract.protocolJson.decodeFromString<IncidentData>(json)
                 val intent = Intent(this, IncidentAlertActivity::class.java).apply {
                     putExtra("reason", incident.type)
                     putExtra("timestamp", incident.timestamp)
@@ -345,7 +349,7 @@ class MainActivity : ComponentActivity(),
         } else if (messageEvent.path == ProtocolContract.Paths.DASHBOARD_DATA) {
             try {
                 val json = String(messageEvent.data)
-                val newTelemetry = explicitJson.decodeFromString<TelemetryState>(json)
+                val newTelemetry = ProtocolContract.protocolJson.decodeFromString<TelemetryState>(json)
                 val now = System.currentTimeMillis()
 
                 telemetryState.value = newTelemetry.copy(
@@ -435,7 +439,7 @@ class MainActivity : ComponentActivity(),
 
                         dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json -> 
                             try { 
-                                val newTelemetry = explicitJson.decodeFromString<TelemetryState>(json)
+                                val newTelemetry = ProtocolContract.protocolJson.decodeFromString<TelemetryState>(json)
                                 val now = System.currentTimeMillis()
                                 
                                 telemetryState.value = newTelemetry.copy(
@@ -471,7 +475,13 @@ class MainActivity : ComponentActivity(),
                     }
                     ProtocolContract.Paths.SETTINGS_SYNC -> {
                         dataMap.getString(ProtocolContract.Keys.SETTINGS_JSON)?.let { json -> 
-                            try { watchSettingsState.value = explicitJson.decodeFromString<WatchSettings>(json) } catch(e: Exception) { } 
+                            try { 
+                                val newSettings = ProtocolContract.protocolJson.decodeFromString<WatchSettings>(json)
+                                watchSettingsState.value = newSettings
+                                
+                                // v34.6: Re-evaluate location updates whenever settings change (to catch Phone GPS toggle)
+                                startLocationUpdates()
+                            } catch(e: Exception) { }
                         }
                     }
                 }
@@ -507,7 +517,7 @@ class MainActivity : ComponentActivity(),
 
                     dataMap.getString(ProtocolContract.Keys.TELEMETRY_JSON)?.let { json ->
                         try {
-                            val telemetry = explicitJson.decodeFromString<TelemetryState>(json)
+                            val telemetry = ProtocolContract.protocolJson.decodeFromString<TelemetryState>(json)
                             val now = System.currentTimeMillis()
                             
                             launch(Dispatchers.Main) {
@@ -542,7 +552,7 @@ class MainActivity : ComponentActivity(),
     private fun sendSettings(settings: WatchSettings) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val settingsJson = explicitJson.encodeToString(settings)
+                val settingsJson = ProtocolContract.protocolJson.encodeToString(settings)
                 val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.SETTINGS_SYNC).apply {
                     dataMap.putString(ProtocolContract.Keys.SETTINGS_JSON, settingsJson)
                     dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
@@ -698,8 +708,8 @@ fun FusionStatusCard(mode: GpsMode, speed: Float) {
     val (color, text) = when (mode) {
         GpsMode.PHONE_PRIMARY -> Color(0xFF42A5F5) to "GPS FUSION: ACTIVE (PHONE)"
         GpsMode.WATCH_ONLY -> Color(0xFFFFA726) to "GPS FUSION: STANDALONE (WATCH)"
-        GpsMode.WATCH_HYBRID -> Color(0xFF66BB6A) to "GPS FUSION: HYBRID (GPS+NET)"
-        GpsMode.WATCH_NETWORK_ONLY -> Color(0xFFEF5350) to "GPS FUSION: NETWORK (FALLBACK)"
+        GpsMode.WATCH_HYBRID -> Color(0xFF66BB6A) to "GPS FUSION: WATCH HYBRID (GPS+NET)"
+        GpsMode.WATCH_NETWORK_ONLY -> Color(0xFFEF5350) to "GPS FUSION: WATCH NETWORK (FALLBACK)"
     }
     
     Surface(

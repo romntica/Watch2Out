@@ -47,7 +47,7 @@ class WatchMessageService : WearableListenerService() {
                         serviceScope.launch {
                             try {
                                 val currentSettings = settingsRepository.settingsFlow.first()
-                                val newSettings = Json.decodeFromString<WatchSettings>(json)
+                                val newSettings = ProtocolContract.protocolJson.decodeFromString<WatchSettings>(json)
                                 
                                 // Optimization: Only update if the settings have actually changed
                                 // This reduces Disk I/O (Read_top) and unnecessary background work.
@@ -219,7 +219,7 @@ class WatchMessageService : WearableListenerService() {
 
     private suspend fun replyWithSettings(settings: WatchSettings) {
         try {
-            val settingsJson = Json.encodeToString(settings)
+            val settingsJson = ProtocolContract.protocolJson.encodeToString(settings)
             val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.SETTINGS_SYNC).apply {
                 dataMap.putString(ProtocolContract.Keys.SETTINGS_JSON, settingsJson)
                 dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())

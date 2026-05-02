@@ -134,8 +134,8 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         serviceScope.launch(Dispatchers.Default) {
             try {
                 val dummy = TelemetryState()
-                val json = Json.encodeToString(dummy)
-                Json.decodeFromString<TelemetryState>(json)
+                val json = ProtocolContract.protocolJson.encodeToString(dummy)
+                ProtocolContract.protocolJson.decodeFromString<TelemetryState>(json)
                 Log.d(TAG, "Serialization warmed up")
             } catch (e: Exception) {
                 Log.e(TAG, "Warmup failed: ${e.message}")
@@ -215,6 +215,8 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
             settingsRepository.settingsFlow.collect { settings ->
                 currentSettings = settings
                 Log.d(TAG, "Settings Updated: ScoreThreshold=${settings.crashScoreThreshold}")
+                // v34.5: Immediately push state to phone when settings change (e.g. Phone GPS toggle)
+                sendTelemetryToPhone(_telemetry.value, fullSync = true)
             }
         }
     }
@@ -415,16 +417,24 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
     private fun handleUpdateHeartbeat(intent: Intent) {
         val json = intent.getStringExtra("heartbeat_json") ?: ""
         if (json.isNotEmpty()) {
-            val hb = Json.decodeFromString<Heartbeat>(json)
+            val hb = ProtocolContract.protocolJson.decodeFromString<Heartbeat>(json)
             lastHeartbeatTime = SystemClock.elapsedRealtime()
 
-            _telemetry.value = _telemetry.value.copy(
-                isPhoneGpsActive = hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE,
-                phoneGpsAccuracy = hb.phoneGpsAccuracy,
-                isHintReliable = hb.isSpeedHintReliable,
-                gpsAgeMs = hb.elapsedMs,
-                hbAgeMs = 0L
-            )
+            // v34.2: Option to ignore Phone GPS data
+            if (currentSettings.usePhoneGps) {
+                _telemetry.value = _telemetry.value.copy(
+                    isPhoneGpsActive = hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE,
+                    phoneGpsAccuracy = hb.phoneGpsAccuracy,
+                    isHintReliable = hb.isSpeedHintReliable,
+                    gpsAgeMs = hb.elapsedMs,
+                    hbAgeMs = 0L
+                )
+            } else {
+                _telemetry.value = _telemetry.value.copy(
+                    isPhoneGpsActive = false,
+                    hbAgeMs = 0L
+                )
+            }
         }
     }
 
@@ -717,12 +727,24 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         val currentUpdateNow = SystemClock.elapsedRealtime()
         val cWAge = if (lastWatchGpsTime > 0) currentUpdateNow - lastWatchGpsTime else -1L
         val cNAge = if (lastNetworkTime > 0) currentUpdateNow - lastNetworkTime else -1L
+        val cPAge = if (lastHeartbeatTime > 0) currentUpdateNow - lastHeartbeatTime else -1L
         
         if (!isSimulatingLocked) {
+            // v34.4: Refined GpsMode Priority Logic
             currentGpsMode = when {
+                // 1. Phone Primary (If enabled & heartbeat is fresh < 15s)
+                currentSettings.usePhoneGps && cPAge in 0..15000L -> GpsMode.PHONE_PRIMARY
+                
+                // 2. Watch Hybrid (GPS + Net fresh < 10s)
                 cWAge in 0..10000L && cNAge in 0..10000L -> GpsMode.WATCH_HYBRID
+                
+                // 3. Watch GPS Only
                 cWAge in 0..10000L -> GpsMode.WATCH_ONLY
+                
+                // 4. Watch Network Only (Fallback)
                 cNAge in 0..20000L -> GpsMode.WATCH_NETWORK_ONLY
+                
+                // 5. Default/Searching
                 else -> GpsMode.WATCH_ONLY
             }
         }
@@ -745,6 +767,7 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
 
         val isFix = cGpsStatus == SensorStatus.FIX_3D || cGpsStatus == SensorStatus.LOW_ACC
         val cGpsStatusText = when {
+            currentGpsMode == GpsMode.PHONE_PRIMARY -> "Phone GPS"
             !gpsProviderEnabled -> "Unavailable"
             isFix -> String.format(Locale.US, "%.1fm", readingSnapshot[12])
             _currentState.value == IncidentState.MONITORING -> "Searching"
@@ -753,8 +776,22 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
 
         updateBatteryDiagnostics()
 
-        val isIncidentActive = vInferenceState != VehicleInferenceState.IDLE && vInferenceState != VehicleInferenceState.MOVING
-        val shouldDataSyncNow = vInferenceState != lastReportedFsmState || _currentState.value != lastReportedState || (nowTime - lastFullTelemetrySyncTime >= 600000L)
+        // v34.9: Strictly Critical-Only Sync Strategy
+        // 1. Monitor State Change: Only explicit Start/Stop commands
+        val overallStateChanged = _currentState.value != lastReportedState
+        
+        // 2. Critical Alert Transitions Only (IMPACT, WAIT_CONFIRM, CONFIRMED_CRASH)
+        // All other states (IDLE, MOVING, PRE_EVENT, FALLING, POST_MOTION, STILLNESS) rely on periodic sync.
+        val isCriticalState = vInferenceState == VehicleInferenceState.IMPACT || 
+                             vInferenceState == VehicleInferenceState.WAIT_CONFIRM || 
+                             vInferenceState == VehicleInferenceState.CONFIRMED_CRASH
+        val isIncidentTransition = isCriticalState && (vInferenceState != lastReportedFsmState)
+
+        // 3. Tiered Periodic Sync
+        val periodicInterval = if (currentSettings.usePhoneGps) 60000L else 600000L // 1 min (Fusion) vs 10 min (Standalone)
+        val isTimeForPeriodicSync = (nowTime - lastFullTelemetrySyncTime >= periodicInterval)
+        
+        val shouldDataSyncNow = overallStateChanged || isIncidentTransition || isTimeForPeriodicSync
         
         val updatedTelemetry = _telemetry.value.copy(
             currentImpact = impact, accelX = readingSnapshot[0], accelY = readingSnapshot[1], accelZ = readingSnapshot[2],
@@ -786,7 +823,8 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
             lastReportedFsmState = vInferenceState
         }
 
-        if (isHighSpeedSyncRequested || isIncidentActive) {
+        // v34.9: High-Speed Dash Streaming (Triggered by Phone Request or Critical State)
+        if (isHighSpeedSyncRequested || isCriticalState) {
             if (startTime - lastDashboardStreamTime >= 200L) {
                 streamTelemetryToDashboard(updatedTelemetry)
                 lastDashboardStreamTime = startTime
@@ -855,7 +893,7 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
                         dataMap.putString(ProtocolContract.Keys.WATCH_GPS_STATUS, telemetry.gpsStatus.name)
                         dataMap.putString(ProtocolContract.Keys.WATCH_GPS_TEXT, telemetry.gpsStatusText)
                         if (fullSync || !isActive) {
-                            val json = withContext(Dispatchers.IO) { Json.encodeToString(telemetry) }
+                            val json = withContext(Dispatchers.IO) { ProtocolContract.protocolJson.encodeToString(telemetry) }
                             dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, json)
                         }
                         setUrgent()
@@ -871,7 +909,7 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         serviceScope.launch {
             if (!dashboardStreamMutex.tryLock()) return@launch
             try {
-                val json = withContext(Dispatchers.IO) { Json.encodeToString(telemetry) }
+                val json = withContext(Dispatchers.IO) { ProtocolContract.protocolJson.encodeToString(telemetry) }
                 val data = json.toByteArray()
                 val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
                 for (node in nodes) {

@@ -47,6 +47,7 @@ fun SettingsScreen(
     var callRecipient by remember { mutableStateOf(currentSettings.callRecipient) }
     var useWatchDirectDispatch by remember { mutableStateOf(currentSettings.useWatchDirectDispatch) }
     var isAutoStartEnabled by remember { mutableStateOf(currentSettings.isAutoStartEnabled) }
+    var usePhoneGps by remember { mutableStateOf(currentSettings.usePhoneGps) }
 
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -102,6 +103,13 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth()
             )
         }
+        item {
+            ToggleChip(
+                checked = usePhoneGps, onCheckedChange = { usePhoneGps = it },
+                label = { Text("Use Phone GPS") }, toggleControl = { Switch(checked = usePhoneGps, onCheckedChange = null) },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
         // --- Action Buttons ---
         item {
@@ -119,6 +127,7 @@ fun SettingsScreen(
                             isTelemetryLoggingEnabled = isTelemetryLoggingEnabled,
                             isAutoStartEnabled = isAutoStartEnabled,
                             useWatchDirectDispatch = useWatchDirectDispatch,
+                            usePhoneGps = usePhoneGps,
                             isSmsEnabled = isSmsEnabled,
                             smsRecipient = smsRecipient,
                             isCallEnabled = isCallEnabled,

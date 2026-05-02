@@ -3,7 +3,22 @@
 **Watch² Out** is a robust, safety-critical accident detection system for **Wear OS**, inspired by high-end crash detection algorithms. It monitors for **Vehicle Crashes (High-G)** and **Human Falls (Low-G)** in real-time.
 However, this is an experimental attempt. **NEVER TRUST** this app for real safety.
 
-## 🚀 Recent Core Enhancements (v1.5 / FSM v32.0)
+## 🚀 Recent Core Enhancements (v1.2 / FSM v34.0)
+
+### 🛡️ High-Reliability Alerts (v34.0)
+*   **Android 14+ BAL Bypass**: Implemented a robust alert mechanism using a dedicated `AlertReceiver` and **Full-Screen Intent (FSI)** notifications to reliably bypass Background Activity Launch restrictions on modern Android versions.
+*   **Persistent Fail-Safe Vibration**: Added a continuous, high-intensity repeating vibration pattern that starts at the moment of detection and persists until the user interacts with the alert UI.
+*   **Aggressive Screen Wake**: Integrated `KeyguardManager` logic to force wake the screen and dismiss the lockscreen overlay, ensuring the critical alert is immediately visible.
+
+### 🔋 Startup & Performance Optimization (v33.3)
+*   **Zero-Lag Startup**: Resolved UI thread hangs (`Davey` logs) by staggering hardware sensor registration with micro-delays and implementing a background **Serialization Warm-up** engine.
+*   **Streamlined Telemetry**: Optimized the `TelemetryState` data model by removing redundant debugging fields, resulting in faster serialization and lower communication latency between the Watch and Phone.
+*   **Delayed Initial Sync**: Postponed the first data handshake by 3 seconds after boot to ensure the system is fully stabilized before starting heavy network activity.
+
+### 🗺️ Hybrid GPS Fusion Toggle (v34.2)
+*   **Configurable Fusion**: Added a user-controllable option to enable or disable **Phone GPS integration**.
+*   **Passive Battery Saver**: When Phone GPS is disabled, the mobile app automatically switches to a low-frequency (15-min) "passive" update mode to maintain a backup emergency location without draining the battery.
+*   **Unified UI Status**: Standardized GPS status labels ("WATCH ONLY", "WATCH HYBRID", "WATCH NET ONLY") across all screens for absolute clarity on the active tracking source.
 
 ### 🛡️ Fail-Safe Data Delivery (v32.0)
 *   **Disk-Based Persistence**: Critical EDR reports and audio evidence are now automatically saved to a local "Fail-Safe Store" if immediate transfer to the phone fails.
