@@ -53,6 +53,8 @@
             android:launchMode="singleInstance">
         </activity>
 
+        <receiver android:name=".presentation.IncidentAlertActivity$AlertReceiver" android:exported="false" />
+
         <service
             android:name=".service.SentinelService"
             android:foregroundServiceType="specialUse|location|microphone"

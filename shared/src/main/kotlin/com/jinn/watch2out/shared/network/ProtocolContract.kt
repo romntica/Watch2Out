@@ -20,6 +20,8 @@ object ProtocolContract {
         // Dashboard Control
         const val DASHBOARD_START = "$BASE/dashboard/start"
         const val DASHBOARD_STOP = "$BASE/dashboard/stop"
+        const val DASHBOARD_DATA = "$BASE/dashboard/data"
+        const val DASHBOARD_CONFIG = "$BASE/dashboard/config"
         
         // Simulation Commands
         const val SIMULATE_HARD_BRAKE = "$BASE/sim/hard_brake"
@@ -62,6 +64,7 @@ object ProtocolContract {
         const val TELEMETRY_JSON = "telemetry_json"
         const val HEARTBEAT_JSON = "heartbeat_json"
         const val IS_ACTIVE = "is_active"
+        const val WINDOW_MS = "window_ms"
         const val SYNC_MODE_HIGH_SPEED = "sync_mode_high_speed"
         const val ACCEL_STATUS = "accel_status"
         const val GYRO_STATUS = "gyro_status"

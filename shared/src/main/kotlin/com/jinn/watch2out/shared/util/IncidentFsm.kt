@@ -80,6 +80,9 @@ object IncidentFsm {
                 // Analysis of rolling or debris motion
                 if (speedKmh < config.stillnessSpeedThresholdKmh) {
                     VehicleInferenceState.STILLNESS
+                } else if (impactG > 0.8f && impactG < 1.2f && peakScore < config.crashScoreThreshold * 0.5f) {
+                    // v33.5: Low-impact return. If G-forces stabilized and peak score was minor, return to driving.
+                    VehicleInferenceState.MOVING
                 } else {
                     VehicleInferenceState.POST_MOTION
                 }
@@ -94,9 +97,13 @@ object IncidentFsm {
                     // False alarm or minor bump, resumed driving
                     VehicleInferenceState.MOVING
                 } else {
-                    VehicleInferenceState.STILLNESS
+                    // v33.6: Auto-reset fallback. If stillness achieved but peak was below threshold, reset to IDLE.
+                    // This prevents hanging in the [0.3 * threshold, 1.0 * threshold] range.
+                    VehicleInferenceState.IDLE
                 }
             }
+
+
 
             VehicleInferenceState.WAIT_CONFIRM -> {
                 // Logic for timeout to CONFIRMED_CRASH is handled by the service/timer

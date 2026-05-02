@@ -76,15 +76,8 @@ data class TelemetryState(
     val pAccelX: Float = 0f,
     val pAccelY: Float = 0f,
     val pAccelZ: Float = 0f,
-    val pGyroX: Float = 0f,
-    val pGyroY: Float = 0f,
-    val pGyroZ: Float = 0f,
-    val pAirPressure: Float = 0f,
-    val pTiltAngle: Float = 0f,
-    val pRotationSpeed: Float = 0f,
     val pGpsSpeed: Float = 0f,
     val pCrashScore: Float = 0f,
-    val pGyroRatio: Float = 0f,
     val pRollSum: Float = 0f,
     val pPressureDelta: Float = 0f,
     val maxLongitudinalG: Float = 0f,
@@ -93,18 +86,8 @@ data class TelemetryState(
 
     // Window Peak Data
     val wTimestamp: Long = 0L,
-    val wAccelX: Float = 0f,
-    val wAccelY: Float = 0f,
-    val wAccelZ: Float = 0f,
-    val wGyroX: Float = 0f,
-    val wGyroY: Float = 0f,
-    val wGyroZ: Float = 0f,
-    val wAirPressure: Float = 0f,
-    val wTiltAngle: Float = 0f,
-    val wRotationSpeed: Float = 0f,
     val wGpsSpeed: Float = 0f,
     val wCrashScore: Float = 0f,
-    val wGyroRatio: Float = 0f,
     val wRollSum: Float = 0f,
     val wPressureDelta: Float = 0f,
     val wMaxLongitudinalG: Float = 0f,
@@ -124,18 +107,14 @@ data class TelemetryState(
     val watchGpsAgeMs: Long = 0L,
     val lastLat: Double = 0.0,
     val lastLon: Double = 0.0,
-    val lastSpeedMps: Float = 0f,
     val lastAccuracyM: Float = 0f,
-    val gpsUiReason: String = "CALLBACK_MISSING", // GPS_OFF, NO_FIX_YET, STALE, CALLBACK_MISSING, ACTIVE
     
-    val displacementM: Float = 0f,
     val stationaryGateApplied: Boolean = false,
     val speedReason: String = "RAW", // RAW, ZERO_BY_STATIONARY, ZERO_BY_ACCURACY, ZERO_BY_LOW_CONFIDENCE, PASS_THROUGH, STALL_DECAY, SPIKE_SUPPRESSED
     
     // Battery & CPU Diagnostics (v28.3)
     val batteryLevel: Int = -1,
     val batteryChangePerHour: Float = 0f,
-    val cpuUsage: Float = 0f,
 
     // Phase 6: Spike & Stall Management (v28.5)
     val speedRawKmh: Float = 0f,
@@ -147,27 +126,12 @@ data class TelemetryState(
     val recentAvgSpeedKmh: Float = 0f,
     val satelliteCount: Int = 0,
     val bearingChangeDeg: Float = 0f,
-    val decisionReason: String = "INITIALIZING",
-
-    // Phase 6b: Enhanced Anomaly Diagnostics (v28.5)
-    val gpsConfidence: Float = 1.0f,          // 0.0 - 1.0 based on accuracy/age/satellites
-    val callbackContinuityScore: Float = 1.0f, // 0.0 - 1.0 based on timing consistency
-    val realEventConfidence: Float = 0f,       // 0.0 - 1.0 based on IMU ACTIVE_HIGH intensity
-    val displayDecisionPath: String = "NONE",  // Detailed trace of speed logic decision
-
-    // Phase 6c: Diagnostic Weights (v28.5)
-    val currentGpsWeight: Float = 0f,
-    val currentImuWeight: Float = 0f,
-    val continuityWeight: Float = 0f,
-    val displacementWeight: Float = 0f,
-    val bearingWeight: Float = 0f,
 
     // Phase 7: Sync & Indicator Diagnostics (v28.6)
     val accelStatus: SensorStatus = SensorStatus.UNKNOWN,
     val gyroStatus: SensorStatus = SensorStatus.UNKNOWN,
     val pressureStatus: SensorStatus = SensorStatus.UNKNOWN,
     val rotationStatus: SensorStatus = SensorStatus.UNKNOWN,
-    val syncLagMs: Long = 0L,
     val wearTimestamp: Long = 0L,
     val syncReason: String = "PERIODIC",
     
@@ -175,3 +139,4 @@ data class TelemetryState(
     val gpsStatus: SensorStatus = SensorStatus.UNKNOWN,
     val gpsStatusText: String = "Unavailable"
 )
+

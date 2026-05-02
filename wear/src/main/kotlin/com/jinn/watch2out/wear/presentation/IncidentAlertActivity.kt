@@ -3,13 +3,11 @@ package com.jinn.watch2out.wear.presentation
 
 import android.content.BroadcastReceiver
 import android.content.Context
+import android.app.KeyguardManager
+import android.app.ActivityOptions
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Build
-import android.os.Bundle
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
+import android.os.*
 import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -41,25 +39,48 @@ import kotlinx.coroutines.tasks.await
  */
 class IncidentAlertActivity : ComponentActivity() {
     
+    class AlertReceiver : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val alertIntent = Intent(context, IncidentAlertActivity::class.java).apply {
+                putExtras(intent)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            }
+            val options = ActivityOptions.makeBasic()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                options.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+            }
+            context.startActivity(alertIntent, options.toBundle())
+        }
+    }
+
     private enum class UIState { ALERTING, CANCELLATION_WINDOW }
+
+
+    private var vibrator: Vibrator? = null
 
     private val dismissReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.jinn.watch2out.DISMISS_ALERT") finish()
+            if (intent?.action == "com.jinn.watch2out.DISMISS_ALERT") {
+                vibrator?.cancel()
+                finish()
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Ensure screen turns on and shows over lockscreen
+        // v34.0: Aggressive Wake and Show-over-lock logic
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
+            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            keyguardManager.requestDismissKeyguard(this, null)
         } else {
             @Suppress("DEPRECATION")
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
                 WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
             )
@@ -79,7 +100,20 @@ class IncidentAlertActivity : ComponentActivity() {
         val maxG = intent.getFloatExtra("maxG", 0f)
         val speed = intent.getFloatExtra("speed", 0f)
 
-        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        // v33.9: Signal service to stop its fail-safe vibration as activity takes over
+        startService(Intent(this, SentinelService::class.java).apply {
+            action = SentinelService.ACTION_STOP_VIBRATION
+        })
+
+        // Force Wakeup and screen on (v33.1)
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "Watch2Out:AlertWakeLock"
+        )
+        wakeLock.acquire(30000L) // 30s max safety
+
+        vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
             vibratorManager.defaultVibrator
         } else {
@@ -107,14 +141,19 @@ class IncidentAlertActivity : ComponentActivity() {
             // Core Logic: Dispatch immediately after 15s of no response
             LaunchedEffect(uiState) {
                 if (uiState == UIState.ALERTING) {
+                    // Continuous High-Intensity Vibration (v33.1)
+                    val effect = VibrationEffect.createWaveform(longArrayOf(0, 800, 200), 0)
+                    vibrator?.vibrate(effect)
+                    
                     while (countdown > 0) {
-                        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 100, 400), -1))
                         delay(1000)
                         countdown--
                     }
+                    vibrator?.cancel()
                     // 15s Timeout reached: Dispatch immediately
                     startFinalDispatch(reason, timestamp, lat, lon, maxG, speed)
                 } else {
+                    vibrator?.cancel()
                     // Manual "I'M OK" press window
                     while (cancelCountdown > 0) {
                         delay(1000)
@@ -197,6 +236,7 @@ class IncidentAlertActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        vibrator?.cancel()
         unregisterReceiver(dismissReceiver)
     }
 }

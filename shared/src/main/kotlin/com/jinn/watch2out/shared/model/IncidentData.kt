@@ -14,6 +14,8 @@ data class IncidentData(
     val utcTime: String = "", 
     val latitude: Double? = null,
     val longitude: Double? = null,
+    val lastKnownLat: Double? = null,
+    val lastKnownLon: Double? = null,
     val maxG: Float = 0f,
     val speed: Float = 0f,
     val isSimulation: Boolean = false,

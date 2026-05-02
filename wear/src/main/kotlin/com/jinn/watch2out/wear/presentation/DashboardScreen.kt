@@ -176,17 +176,13 @@ fun DashboardScreen(
 
 @Composable
 private fun GpsStatusMiniBox(label: String, statusText: String, isActive: Boolean, isPrimary: Boolean, modifier: Modifier = Modifier) {
-    val isPhoneReserved = label.contains("PHONE") // On Wear, if it's phone, it's always reserved in this policy
-    val borderColor = if (isPhoneReserved) Color.Gray 
-                      else if (isPrimary) Color(0xFF42A5F5) 
+    val borderColor = if (isPrimary) Color(0xFF42A5F5) 
                       else if (isActive) Color(0xFF4CAF50) 
                       else Color.DarkGray
-    val bgColor = if (isPhoneReserved) Color.Black
-                  else if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.15f) 
+    val bgColor = if (isPrimary) Color(0xFF42A5F5).copy(alpha = 0.15f) 
                   else Color.Transparent
     
     val displayStatus = when {
-        isPhoneReserved -> "RES"
         statusText == "Searching" -> "SRCH"
         statusText == "Unavailable" -> "OFF"
         else -> statusText
@@ -199,14 +195,14 @@ private fun GpsStatusMiniBox(label: String, statusText: String, isActive: Boolea
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(label, fontSize = 7.sp, color = if (isPhoneReserved) Color.Gray else if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
+        Text(label, fontSize = 7.sp, color = if (isPrimary) Color.White else Color.Gray, fontWeight = FontWeight.Bold)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(4.dp).background(if (isPhoneReserved) Color.Gray else if (isActive) Color.Green else if (statusText == "Searching") Color.Yellow else Color.Red, CircleShape))
+            Box(modifier = Modifier.size(4.dp).background(if (isActive) Color.Green else if (statusText == "Searching") Color.Yellow else Color.Red, CircleShape))
             Spacer(Modifier.width(2.dp))
             Text(
                 text = displayStatus.uppercase(),
                 fontSize = 9.sp,
-                color = if (isPhoneReserved || (!isActive && statusText != "Searching")) Color.Gray else Color.White,
+                color = if (!isActive && statusText != "Searching") Color.Gray else Color.White,
                 fontWeight = FontWeight.Black,
                 fontFamily = FontFamily.Monospace
             )

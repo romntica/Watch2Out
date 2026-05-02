@@ -1,8 +1,11 @@
 // [Module: :wear]
 package com.jinn.watch2out.wear.service
 
+import android.app.ActivityOptions
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -29,7 +32,6 @@ import com.jinn.watch2out.wear.data.SettingsRepository
 import com.jinn.watch2out.wear.data.TelemetryLogStore
 import com.jinn.watch2out.wear.data.IncidentAssetStore
 import com.jinn.watch2out.wear.presentation.IncidentAlertActivity
-import com.jinn.watch2out.wear.presentation.MainActivity
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,35 +46,30 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Sentinel Service (v28.0): Watch GPS Only Architecture.
- * 
- * POLICY RE-DEFINITION:
- * - Primary Source: Watch Hardware GPS ONLY.
- * - Mobile GPS: Reserved/Excluded from active logic.
- * - FSM & Score: Driven by Watch GPS speed.
- * - Sync: Only user intent and status are real-time.
+ * Sentinel Service (v33.3): Performance Optimized & Streamlined.
  */
 class SentinelService : LifecycleService(), SensorEventListener, LocationListener {
 
     private val TAG = "SentinelFSM"
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val dataClientMutex = Mutex()
+    private val dashboardStreamMutex = Mutex()
     private val audioRecordingMutex = Mutex()
     private val transferMutex = Mutex()
     private var sensorThread: HandlerThread? = null
     private var sensorHandler: Handler? = null
+    private var serviceVibrator: Vibrator? = null
 
     private lateinit var logStore: TelemetryLogStore
     private lateinit var assetStore: IncidentAssetStore
     private lateinit var settingsRepository: SettingsRepository
     private val logBuffer = mutableListOf<TelemetryLogEntry>()
-    private val edrBuffer = mutableListOf<TelemetryPoint>() // Pre-incident cache (5s)
-    private val edrActiveBuffer = mutableListOf<TelemetryPoint>() // Active incident recording
+    private val edrBuffer = mutableListOf<TelemetryPoint>()
+    private val edrActiveBuffer = mutableListOf<TelemetryPoint>()
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
     private val audioFileNameFormat = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
     private val readablePointFormat = SimpleDateFormat("yyyyMMdd-HH:mm:ss:SSS", Locale.US)
     
-    // Configured Json for human-readable output (Pretty Printing)
     private val prettyJson = Json { 
         prettyPrint = true 
         encodeDefaults = true
@@ -81,6 +78,8 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
     
     private var lastBatchSaveTime = 0L
     private var lastLogUploadTime = 0L
+    private var lastFullTelemetrySyncTime = 0L
+    private var lastReportedState = IncidentState.IDLE
 
     private var sensorManager: SensorManager? = null
     private var locationManager: LocationManager? = null
@@ -97,26 +96,18 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
     private var incidentPeakScore = 0f
     private var isSimulatingLocked = false
     
-    /**
-     * GPS Processing Policy: Raw Real-time Direct Reception (v28.1).
-     * - No tolerance, no smoothing, no filtering.
-     * - Handled identically to SensorManager: Callback -> Raw Buffer -> Processing Loop.
-     */
     private val currentReading = FloatArray(15) 
     private var lastWatchGpsTime = 0L
+    private var lastNetworkTime = 0L
     private var lastLocationTime = 0L
     private var lastLocationInterval = 0L
     private var gnssSignalSeen = false
     private var gpsProviderEnabled = false
     
-    // Stationary Gate State (v28.3)
     private var lastLat = 0.0
     private var lastLon = 0.0
     private var lastDisplacement = 0f
-    private var stationaryGateApplied = false
-    private var currentSpeedReason = "RAW"
 
-    // Spike & Stall State (v28.4)
     private val speedHistory = mutableListOf<Float>()
     private var lastBearing = 0f
     private var bearingChange = 0f
@@ -126,6 +117,11 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
     private var stallDecaySpeedMps = 0f
     private var stallStartTime = 0L
     private var stallInitialSpeedMps = 0f
+    private var lastBatteryCheckTime = 0L
+    private var lastBatteryLevel = -1
+    private var batteryConsumptionPerHour = 0f
+    private var lastHeartbeatTime = 0L
+    private var serviceStartTime = 0L
 
     private val gnssStatusCallback = object : android.location.GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: android.location.GnssStatus) {
@@ -133,17 +129,26 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
             gnssSignalSeen = currentSatelliteCount > 0
         }
     }
-    private var lastBatteryCheckTime = 0L
-    private var lastBatteryLevel = -1
-    private var batteryConsumptionPerHour = 0f
-    private var lastHeartbeatTime = 0L
+
+    private fun warmupSerialization() {
+        serviceScope.launch(Dispatchers.Default) {
+            try {
+                val dummy = TelemetryState()
+                val json = Json.encodeToString(dummy)
+                Json.decodeFromString<TelemetryState>(json)
+                Log.d(TAG, "Serialization warmed up")
+            } catch (e: Exception) {
+                Log.e(TAG, "Warmup failed: ${e.message}")
+            }
+        }
+    }
 
     private fun updateBatteryDiagnostics() {
         val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         val now = SystemClock.elapsedRealtime()
         
-        if (lastBatteryLevel != -1 && now - lastBatteryCheckTime > 60000) { // Calculate every 1 minute
+        if (lastBatteryLevel != -1 && now - lastBatteryCheckTime > 60000) {
             val diff = lastBatteryLevel - level
             val hours = (now - lastBatteryCheckTime) / 3600000f
             if (hours > 0) {
@@ -156,26 +161,32 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
             lastBatteryCheckTime = now
         }
     }
+
     private var overallPeak = TelemetryState()
     private var baselinePressure = 0f
     private var currentSettings = WatchSettings()
     private var telemetryCounter = 0
     private var isHighSpeedSyncRequested = false
-    private val THROTTLE_BATTERY_SAVE = 25 // ~5s at 200ms loop
-    private val THROTTLE_HIGH_SPEED = 1    // Every cycle (~200ms)
+    private var lastReportedFsmState = VehicleInferenceState.IDLE
+    private var lastDashboardStreamTime = 0L
+    
+    private var windowPeak = TelemetryState()
+    private val peakHistoryWindowMs = 3600000L
+    private var requestedWindowMs = 600000L
+    private val peakHistory = mutableListOf<Pair<Long, FloatArray>>()
 
-    // Policy Flag: Compile-time isolation for Reserved Phone GPS
-    private val USE_PHONE_GPS_RESERVED = false 
+    private val usePhoneGpsReserved = false 
 
     var currentGpsMode = GpsMode.WATCH_ONLY
         private set
 
-    private val G_EARTH = 9.80665f
-    private val MPS_TO_KMH = 3.6f
+    private val gEarth = 9.80665f
+    private val mpsToKmh = 3.6f
 
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        serviceStartTime = SystemClock.elapsedRealtime()
         logStore = TelemetryLogStore(this)
         assetStore = IncidentAssetStore(this)
         settingsRepository = SettingsRepository(this)
@@ -183,25 +194,28 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         
         val channelId = createNotificationChannel()
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Watch² Out Sentinel")
+            .setContentTitle("Watch\u00b2 Out Sentinel")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()
         startForeground(NOTIFICATION_ID, notification)
 
+        warmupSerialization()
+
         serviceScope.launch {
             sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
             locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
             
+            initHardwareIPC()
+            
+            delay(3000) 
+            sendTelemetryToPhone(_telemetry.value, fullSync = true)
+            startProcessingLoop()
+
             settingsRepository.settingsFlow.collect { settings ->
                 currentSettings = settings
-                Log.d(TAG, "Settings Updated: ScoreThreshold=${settings.crashScoreThreshold}, AccelMax=${settings.accelMaxG}")
+                Log.d(TAG, "Settings Updated: ScoreThreshold=${settings.crashScoreThreshold}")
             }
-        }
-        
-        serviceScope.launch {
-            initHardwareIPC()
-            startProcessingLoop()
         }
     }
 
@@ -215,11 +229,9 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Ensure Foreground state is maintained or initialized (v28.6.6)
-        // Fixes ANR: "Context.startForegroundService() did not then call Service.startForeground()"
         val channelId = createNotificationChannel()
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Watch² Out Sentinel")
+            .setContentTitle("Watch\u00b2 Out Sentinel")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .build()
@@ -228,16 +240,7 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         super.onStartCommand(intent, flags, startId)
         
         if (intent == null) {
-            Log.w(TAG, "SentinelService restarted with NULL intent (Crash Recovery)")
-            serviceScope.launch {
-                val persistedState = settingsRepository.monitoringStateFlow.first()
-                if (persistedState == IncidentState.MONITORING.name) {
-                    Log.i(TAG, "Resuming monitoring after crash/restart")
-                    withContext(Dispatchers.Main) {
-                        startMonitoringLogic()
-                    }
-                }
-            }
+            handleCrashRecovery()
             return Service.START_STICKY
         }
 
@@ -245,148 +248,211 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         
         try {
             when (action) {
-                ACTION_START_MONITORING -> {
-                    startMonitoringLogic()
-                }
-                ACTION_STOP_MONITORING -> {
-                    _currentState.value = IncidentState.IDLE
-                    lastKnownState = IncidentState.IDLE
-                    serviceScope.launch { settingsRepository.updateMonitoringState(IncidentState.IDLE.name) }
-                    setVInferenceState(VehicleInferenceState.IDLE)
-                    stopWatchGps()
-                    stopAudioRecording(delete = true)
-
-                    // Phase 7: Final Sync (v28.6) - Set status to AVAILABLE (actual hardware state) 
-                    // instead of DISABLED, so Pull-to-Refresh can see Wear state while stopped.
-                    val finalTelemetry = _telemetry.value.copy(
-                        vehicleInferenceState = VehicleInferenceState.IDLE,
-                        accelStatus = getSensorStatus(Sensor.TYPE_ACCELEROMETER),
-                        gyroStatus = getSensorStatus(Sensor.TYPE_GYROSCOPE),
-                        pressureStatus = getSensorStatus(Sensor.TYPE_PRESSURE),
-                        rotationStatus = getSensorStatus(Sensor.TYPE_ROTATION_VECTOR),
-                        isWatchGpsActive = false,
-                        isGpsActive = false,
-                        wearTimestamp = System.currentTimeMillis(),
-                        gpsStatus = SensorStatus.UNAVAILABLE,
-                        gpsStatusText = "Available"
-                    )
-                    _telemetry.value = finalTelemetry
-                    
-                    serviceScope.launch {
-                        try {
-                            val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
-                                dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, false)
-                                dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
-                                dataMap.putString(ProtocolContract.Keys.LOC_STATUS, currentGpsMode.name)
-                                
-                                dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, finalTelemetry.accelStatus.name)
-                                dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, finalTelemetry.gyroStatus.name)
-                                dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, finalTelemetry.pressureStatus.name)
-                                dataMap.putString(ProtocolContract.Keys.ROT_STATUS, finalTelemetry.rotationStatus.name)
-                                dataMap.putString(ProtocolContract.Keys.WATCH_GPS_STATUS, finalTelemetry.gpsStatus.name)
-                                dataMap.putString(ProtocolContract.Keys.WATCH_GPS_TEXT, finalTelemetry.gpsStatusText)
-                                
-                                val json = prettyJson.encodeToString(finalTelemetry)
-                                dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, json)
-                                setUrgent()
-                            }.asPutDataRequest()
-                            
-                            // Wait for delivery before killing service
-                            Wearable.getDataClient(this@SentinelService).putDataItem(putDataReq).await()
-                            Log.d(TAG, "Final Stop Sync Delivered")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Final Sync failed", e)
-                        } finally {
-                            withContext(Dispatchers.Main) {
-                                stopForeground(STOP_FOREGROUND_REMOVE)
-                                stopSelf()
-                            }
-                        }
-                    }
-                    SentinelComplicationService.update(this)
-                }
-                ACTION_RESET_PEAKS -> {
-                    overallPeak = TelemetryState()
-                    Log.i(TAG, "Peaks reset")
-                }
-                ACTION_DISMISS_INCIDENT -> {
-                    setVInferenceState(VehicleInferenceState.IDLE)
-                    stopAudioRecording(delete = true)
-                    if (audioRecordingMutex.isLocked) audioRecordingMutex.unlock()
-                    SentinelComplicationService.update(this)
-                }
-                ACTION_FINAL_DISPATCH -> {
-                    Log.w(TAG, "FINAL DISPATCH")
-                    setVInferenceState(VehicleInferenceState.CONFIRMED_CRASH)
-                    // Stage 2: Continue recording for 15s more if already recording
-                    if (mediaRecorder != null) {
-                        Log.i(TAG, "Stage 2 Audio: Extending recording by 15s")
-                    } else {
-                        // Just in case it wasn't recording, start now
-                        startAudioRecording(durationMs = 15000L)
-                    }
-                }
-                ACTION_UPDATE_HEARTBEAT -> {
-                    val json = intent.getStringExtra("heartbeat_json") ?: ""
-                    if (json.isNotEmpty()) {
-                        val hb = Json.decodeFromString<Heartbeat>(json)
-                        lastHeartbeatTime = SystemClock.elapsedRealtime()
-
-                        // POLICY: Phone GPS is strictly Reserved. Do NOT update currentGpsSpeed.
-                        if (USE_PHONE_GPS_RESERVED) {
-                             Log.v(TAG, "Reserved Phone Speed: ${hb.phoneSpeedKmh} km/h")
-                        }
-
-                        _telemetry.value = _telemetry.value.copy(
-                            isPhoneGpsActive = hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE,
-                            phoneGpsAccuracy = hb.phoneGpsAccuracy,
-                            isHintReliable = hb.isSpeedHintReliable,
-                            gpsAgeMs = hb.elapsedMs,
-                            hbAgeMs = 0L
-                        )
-                    }
-                }
-                ACTION_SIMULATE -> {
-                    simulateIncident(intent.getStringExtra("path") ?: "")
-                }
-                ACTION_INJECT_DATA -> {
-                    injectCustomSensorData(intent.getStringExtra("csv") ?: "")
-                }
-                ACTION_UPDATE_SYNC_POLICY -> {
-                    val wasHighSpeed = isHighSpeedSyncRequested
-                    isHighSpeedSyncRequested = intent.getBooleanExtra("high_speed", false)
-                    Log.d(TAG, "Sync Policy Updated: HighSpeed=$isHighSpeedSyncRequested")
-                    // Force immediate sync when switching to high speed or if specifically requested
-                    if (isHighSpeedSyncRequested && !wasHighSpeed) {
-                        telemetryCounter = 0 
-                    }
-                }
-                ACTION_FORCE_SYNC -> {
-                    Log.d(TAG, "Force sync requested")
-                    sendTelemetryToPhone(_telemetry.value, fullSync = true)
-                    // Immediate Log Upload (v28.6.3)
-                    serviceScope.launch {
-                        uploadPendingLogs()
-                        retryPendingIncidents() // Also retry assets on manual sync
-                    }
-                }
-                ACTION_SENSOR_STATUS_SYNC -> {
-                    Log.d(TAG, "Immediate sensor status sync requested")
-                    // Immediate response with current hardware availability
-                    val telemetry = _telemetry.value.copy(
-                        accelStatus = getSensorStatus(Sensor.TYPE_ACCELEROMETER),
-                        gyroStatus = getSensorStatus(Sensor.TYPE_GYROSCOPE),
-                        pressureStatus = getSensorStatus(Sensor.TYPE_PRESSURE),
-                        rotationStatus = getSensorStatus(Sensor.TYPE_ROTATION_VECTOR),
-                        wearTimestamp = System.currentTimeMillis()
-                    )
-                    sendTelemetryToPhone(telemetry, fullSync = false)
-                }
+                ACTION_START_MONITORING -> startMonitoringLogic()
+                ACTION_STOP_MONITORING -> handleStopMonitoring()
+                ACTION_RESET_PEAKS -> handleResetPeaks()
+                ACTION_DISMISS_INCIDENT -> handleDismissIncident()
+                ACTION_DASHBOARD_START -> handleDashboardStart()
+                ACTION_DASHBOARD_STOP -> handleDashboardStop()
+                ACTION_DASHBOARD_CONFIG -> handleDashboardConfig(intent)
+                ACTION_FINAL_DISPATCH -> handleFinalDispatch()
+                ACTION_UPDATE_HEARTBEAT -> handleUpdateHeartbeat(intent)
+                ACTION_SIMULATE -> simulateIncident(intent.getStringExtra("path") ?: "")
+                ACTION_INJECT_DATA -> injectCustomSensorData(intent.getStringExtra("csv") ?: "")
+                ACTION_UPDATE_SYNC_POLICY -> handleUpdateSyncPolicy(intent)
+                ACTION_FORCE_SYNC -> handleForceSync()
+                ACTION_SENSOR_STATUS_SYNC -> handleSensorStatusSync()
+                ACTION_STOP_VIBRATION -> stopServiceVibration()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in onStartCommand for action: $action", e)
         }
         return Service.START_STICKY
+    }
+
+    private fun handleCrashRecovery() {
+        serviceScope.launch {
+            val persistedState = settingsRepository.monitoringStateFlow.first()
+            if (persistedState == IncidentState.MONITORING.name) {
+                withContext(Dispatchers.Main) {
+                    startMonitoringLogic()
+                }
+            }
+        }
+    }
+
+    private fun handleStopMonitoring() {
+        _currentState.value = IncidentState.IDLE
+        lastKnownState = IncidentState.IDLE
+        serviceScope.launch { settingsRepository.updateMonitoringState(IncidentState.IDLE.name) }
+        setVInferenceState(VehicleInferenceState.IDLE)
+        stopWatchGps()
+        stopAudioRecording(delete = true)
+        stopServiceVibration()
+        
+        // v33.8: Clear any active incident notifications
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.cancel(INCIDENT_NOTIFICATION_ID)
+
+        val finalTelemetry = _telemetry.value.copy(
+            vehicleInferenceState = VehicleInferenceState.IDLE,
+            accelStatus = getSensorStatus(Sensor.TYPE_ACCELEROMETER),
+            gyroStatus = getSensorStatus(Sensor.TYPE_GYROSCOPE),
+            pressureStatus = getSensorStatus(Sensor.TYPE_PRESSURE),
+            rotationStatus = getSensorStatus(Sensor.TYPE_ROTATION_VECTOR),
+            isWatchGpsActive = false,
+            isGpsActive = false,
+            wearTimestamp = System.currentTimeMillis(),
+            gpsStatus = SensorStatus.UNAVAILABLE,
+            gpsStatusText = "Available",
+        )
+        _telemetry.value = finalTelemetry
+        
+        serviceScope.launch {
+            try {
+                val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
+                    dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, false)
+                    dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+                    dataMap.putString(ProtocolContract.Keys.LOC_STATUS, currentGpsMode.name)
+                    
+                    dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, finalTelemetry.accelStatus.name)
+                    dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, finalTelemetry.gyroStatus.name)
+                    dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, finalTelemetry.pressureStatus.name)
+                    dataMap.putString(ProtocolContract.Keys.ROT_STATUS, finalTelemetry.rotationStatus.name)
+                    dataMap.putString(ProtocolContract.Keys.WATCH_GPS_STATUS, finalTelemetry.gpsStatus.name)
+                    dataMap.putString(ProtocolContract.Keys.WATCH_GPS_TEXT, finalTelemetry.gpsStatusText)
+                    
+                    val json = prettyJson.encodeToString(finalTelemetry)
+                    dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, json)
+                    setUrgent()
+                }.asPutDataRequest()
+                
+                Wearable.getDataClient(this@SentinelService).putDataItem(putDataReq).await()
+            } catch (e: Exception) {
+                Log.e(TAG, "Final Sync failed", e)
+            } finally {
+                withContext(Dispatchers.Main) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+        }
+        SentinelComplicationService.update(this)
+    }
+
+    private fun handleResetPeaks() {
+        overallPeak = TelemetryState()
+        windowPeak = TelemetryState()
+        peakHistory.clear()
+        incidentPeakScore = 0f // v33.7: Also reset internal FSM score memory
+        
+        // v33.7: Update telemetry state immediately and trigger sync so Mobile UI reflects changes
+        val resetTelemetry = _telemetry.value.copy(
+            pCrashScore = 0f,
+            maxImpact = 1.0f,
+            pTimestamp = 0L,
+            pGpsSpeed = 0f,
+            pAccelX = 0f,
+            pAccelY = 0f,
+            pAccelZ = 0f,
+            maxLongitudinalG = 0f,
+            maxLateralG = 0f,
+            maxSpeedDrop = 0f,
+            pRollSum = 0f,
+            pPressureDelta = 0f,
+            
+            wCrashScore = 0f,
+            windowImpact = 1.0f,
+            wMaxSpeedDrop = 0f,
+            wGpsSpeed = 0f,
+            wRollSum = 0f,
+            wPressureDelta = 0f,
+            wMaxLongitudinalG = 0f,
+            wMaxLateralG = 0f,
+            wTimestamp = 0L
+        )
+        _telemetry.value = resetTelemetry
+        sendTelemetryToPhone(resetTelemetry, fullSync = true)
+        
+        Log.i(TAG, "Peaks reset and synced to mobile")
+    }
+
+    private fun handleDismissIncident() {
+        setVInferenceState(VehicleInferenceState.IDLE)
+        stopAudioRecording(delete = true)
+        stopServiceVibration()
+        
+        // v33.8: Clear any active incident notifications
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.cancel(INCIDENT_NOTIFICATION_ID)
+
+        if (audioRecordingMutex.isLocked) audioRecordingMutex.unlock()
+        SentinelComplicationService.update(this)
+    }
+
+    private fun handleDashboardStart() {
+        isHighSpeedSyncRequested = true
+        telemetryCounter = 0
+    }
+
+    private fun handleDashboardStop() {
+        isHighSpeedSyncRequested = false
+    }
+
+    private fun handleDashboardConfig(intent: Intent) {
+        val windowMs = intent.getLongExtra(ProtocolContract.Keys.WINDOW_MS, 600000L)
+        requestedWindowMs = windowMs
+        sendTelemetryToPhone(_telemetry.value, fullSync = true)
+    }
+
+    private fun handleFinalDispatch() {
+        setVInferenceState(VehicleInferenceState.CONFIRMED_CRASH)
+        if (mediaRecorder == null) {
+            startAudioRecording(durationMs = 15000L)
+        }
+    }
+
+    private fun handleUpdateHeartbeat(intent: Intent) {
+        val json = intent.getStringExtra("heartbeat_json") ?: ""
+        if (json.isNotEmpty()) {
+            val hb = Json.decodeFromString<Heartbeat>(json)
+            lastHeartbeatTime = SystemClock.elapsedRealtime()
+
+            _telemetry.value = _telemetry.value.copy(
+                isPhoneGpsActive = hb.phoneGpsStatus == PhoneGpsStatus.AVAILABLE,
+                phoneGpsAccuracy = hb.phoneGpsAccuracy,
+                isHintReliable = hb.isSpeedHintReliable,
+                gpsAgeMs = hb.elapsedMs,
+                hbAgeMs = 0L
+            )
+        }
+    }
+
+    private fun handleUpdateSyncPolicy(intent: Intent) {
+        val wasHighSpeed = isHighSpeedSyncRequested
+        isHighSpeedSyncRequested = intent.getBooleanExtra("high_speed", false)
+        if (isHighSpeedSyncRequested && !wasHighSpeed) {
+            telemetryCounter = 0 
+        }
+    }
+
+    private fun handleForceSync() {
+        sendTelemetryToPhone(_telemetry.value, fullSync = true)
+    }
+
+    private fun handleSensorStatusSync() {
+        val telemetry = _telemetry.value.copy(
+            accelStatus = getSensorStatus(Sensor.TYPE_ACCELEROMETER),
+            gyroStatus = getSensorStatus(Sensor.TYPE_GYROSCOPE),
+            pressureStatus = getSensorStatus(Sensor.TYPE_PRESSURE),
+            rotationStatus = getSensorStatus(Sensor.TYPE_ROTATION_VECTOR),
+            wearTimestamp = System.currentTimeMillis()
+        )
+        sendTelemetryToPhone(telemetry, fullSync = false)
+    }
+
+    private fun stopServiceVibration() {
+        serviceVibrator?.cancel()
     }
 
     private fun createNotificationChannel(): String {
@@ -414,505 +480,357 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
             Sensor.TYPE_ROTATION_VECTOR to "Rotation"
         )
         
-        sensors.forEach { (type, name) ->
-            val sensor = sm.getDefaultSensor(type)
-            if (sensor != null) {
-                val success = sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME, handler)
-                val delay = sensor.minDelay
-                Log.i(TAG, "Sensor registration: $name -> $success (delay=$delay)")
-            } else {
-                Log.w(TAG, "Sensor missing: $name")
+        serviceScope.launch {
+            sensors.forEach { (type, name) ->
+                val sensor = sm.getDefaultSensor(type)
+                if (sensor != null) {
+                    val success = sm.registerListener(this@SentinelService, sensor, SensorManager.SENSOR_DELAY_GAME, handler)
+                    Log.i(TAG, "Sensor registration: $name -> $success")
+                } else {
+                    Log.w(TAG, "Sensor missing: $name")
+                }
+                delay(150)
             }
         }
     }
 
-    // IMU Logic (v28.5)
     private var lastAccelMag = 1.0f
     private var imuMotionState = "UNKNOWN"
     private var anomalyType = "NONE"
-    private var decisionReason = "INITIALIZING"
-    private var displayDecisionPath = "NONE"
     private var gpsConfidence = 1.0f
     private var callbackContinuityScore = 1.0f
     private var realEventConfidence = 0f
-
-    // Diagnostic Weights (v28.5)
-    private var currentGpsWeight = 0f
-    private var currentImuWeight = 0f
-    private var continuityWeight = 0f
-    private var displacementWeight = 0f
-    private var bearingWeight = 0f
+    private var decisionReason = "INITIALIZING"
 
     private var loopDelay = 500L
 
     private fun updateImuMotionState(impactG: Float, gyroRms: Float) {
-        val motion = if (impactG > 1.2f || gyroRms > 15f) "ACTIVE_HIGH"
-                    else if (impactG > 1.05f || gyroRms > 5f) "ACTIVE_LOW"
-                    else "STATIONARY"
-        imuMotionState = motion
+        imuMotionState = when {
+            impactG > 1.2f || gyroRms > 15f -> "ACTIVE_HIGH"
+            impactG > 1.05f || gyroRms > 5f -> "ACTIVE_LOW"
+            else -> "STATIONARY"
+        }
     }
 
     private fun startProcessingLoop() {
         serviceScope.launch {
+            val readingSnapshot = FloatArray(15)
             while (isActive) {
                 val startTime = SystemClock.elapsedRealtime()
-                val impact = calculateCurrentImpact()
-                
-                val gx = currentReading[3]; val gy = currentReading[4]; val gz = currentReading[5]
-                val gyroRms = Math.sqrt((gx*gx + gy*gy + gz*gz).toDouble()).toFloat()
-                
-                updateImuMotionState(impact, gyroRms)
-
-                val currentPressure = currentReading[6]
-                val pDelta = if (baselinePressure > 0f) currentPressure - baselinePressure else 0f
-                
-                val rotVec = currentReading.sliceArray(7..10)
-                val rollDeg = calculateRoll(rotVec)
-
-                // RAW GPS SPEED (Index 11) - Direct Hardware Value
-                val rawGpsSpeedMps = currentReading[11]
-                val rawGpsSpeedKmh = rawGpsSpeedMps * MPS_TO_KMH
-                val gpsAccuracy = currentReading[12]
-                val currentBearing = currentReading[13]
-                
-                // 1. Advanced Anomaly Detection (v28.5)
-                val now = SystemClock.elapsedRealtime()
-                val watchGpsAge = if (lastWatchGpsTime > 0) now - lastWatchGpsTime else -1L
-                var displacementScore = 1.0f
-
-                if (!isSimulatingLocked) {
-                    // Calculate Callback Continuity Score
-                    callbackContinuityScore = if (lastLocationInterval > 0) {
-                        Math.max(0f, 1f - (Math.abs(lastLocationInterval - 1000f) / 3000f))
-                    } else 0.5f
-
-                    // Displacement Consistency: Check if reported speed matches actual movement
-                    val expectedDisplacement = rawGpsSpeedMps * (lastLocationInterval / 1000f)
-                    displacementScore = if (expectedDisplacement > 0.5f) {
-                        Math.min(1.2f, lastDisplacement / expectedDisplacement).coerceIn(0f, 1f)
-                    } else 1.0f
-
-                    // Calculate GPS Confidence with State-Dependent Weights (v28.5)
-                    val accScore = Math.max(0f, 1f - (gpsAccuracy / 80f))
-                    val ageScore = if (watchGpsAge >= 0) Math.max(0f, 1f - (watchGpsAge / 10000f)) else 0f
-                    val satScore = Math.min(1f, currentSatelliteCount / 6f)
-                    
-                    bearingChange = Math.abs(currentBearing - lastBearing)
-                    if (bearingChange > 180) bearingChange = 360 - bearingChange
-                    lastBearing = currentBearing
-                    val bearingScore = Math.max(0f, 1f - (bearingChange / 90f))
-
-                    if (rawGpsSpeedKmh > 20f) {
-                        // Moving State: High Speed
-                        continuityWeight = 0.15f
-                        displacementWeight = 0.20f
-                        bearingWeight = 0.25f
-                        currentImuWeight = 0.20f
-                        currentGpsWeight = 0.20f // Accuracy/Sat/Age combined
-                        
-                        val gpsInternal = (accScore * 0.4f + ageScore * 0.3f + satScore * 0.3f)
-                        gpsConfidence = (gpsInternal * currentGpsWeight + 
-                                        displacementScore * displacementWeight + 
-                                        bearingScore * bearingWeight + 
-                                        (1f - realEventConfidence) * currentImuWeight + 
-                                        callbackContinuityScore * continuityWeight)
-                    } else {
-                        // Low Speed / Stationary State
-                        continuityWeight = 0.30f
-                        displacementWeight = 0.40f
-                        bearingWeight = 0.05f // Ignore bearing noise at low speed
-                        currentImuWeight = 0.15f
-                        currentGpsWeight = 0.10f
-                        
-                        val gpsInternal = (accScore * 0.4f + ageScore * 0.3f + satScore * 0.3f)
-                        gpsConfidence = (gpsInternal * currentGpsWeight + 
-                                        displacementScore * displacementWeight + 
-                                        bearingScore * bearingWeight + 
-                                        (1f - realEventConfidence) * currentImuWeight + 
-                                        callbackContinuityScore * continuityWeight)
-                    }
-
-                    // IMU Real Event Confidence
-                    realEventConfidence = Math.min(1f, Math.max(0f, (impact - 1.2f) / 2.0f) + (gyroRms / 150f))
-
-                    if (rawGpsSpeedKmh > 0.1f) {
-                        speedHistory.add(rawGpsSpeedKmh)
-                        if (speedHistory.size > 25) speedHistory.removeAt(0)
-                    }
-                }
-
-                val avgSpeedKmh = if (speedHistory.isNotEmpty()) speedHistory.average().toFloat() else 0f
-                val maxSpeedRecent = if (speedHistory.isNotEmpty()) speedHistory.maxOrNull() ?: 0f else 0f
-                val deltaV = (maxSpeedRecent - rawGpsSpeedKmh).coerceAtLeast(0f)
-
-                // Refined Anomaly Logic (v28.5)
-                anomalyType = "NONE"
-                
-                // Enhanced Indoor Spike: Combined Criteria
-                val isIndoorPossible = (imuMotionState == "STATIONARY") && (gpsAccuracy > 25f || currentSatelliteCount < 4 || watchGpsAge > 3000)
-                val isIndoorSpike = isIndoorPossible && (rawGpsSpeedKmh > avgSpeedKmh + 25f) && (callbackContinuityScore < 0.7f)
-                
-                val isDriftSpike = (rawGpsSpeedKmh > 8f) && (displacementScore < 0.15f) && (imuMotionState == "STATIONARY")
-                
-                // Bearing Anomaly: Only at significant speed
-                val isBearingAnomaly = (bearingChange > 100f) && (rawGpsSpeedKmh > 25f) && (imuMotionState != "ACTIVE_HIGH")
-                
-                if (isIndoorSpike) anomalyType = "INDOOR_SPIKE"
-                else if (isDriftSpike) anomalyType = "DRIFT_SPIKE"
-                else if (isBearingAnomaly) anomalyType = "BEARING_ANOMALY"
-
-                // Real Event Override: Trust IMU more, GPS becomes auxiliary
-                val isRealEventConfirmed = (rawGpsSpeedKmh > 3f) && (imuMotionState == "ACTIVE_HIGH")
-                if (isRealEventConfirmed) anomalyType = "REAL_EVENT_CONFIRMED"
-
-                spikeSuppressed = (anomalyType != "NONE" && anomalyType != "REAL_EVENT_CONFIRMED")
-
-                // 2. Stall Detection & Decay (v28.5: 4s Stall, 5s Decay)
-                val stallDetected = (watchGpsAge > 4000L && rawGpsSpeedMps > 0.5f) || 
-                                   (currentSatelliteCount < 3 && rawGpsSpeedMps > 2.0f) || 
-                                   (gpsAccuracy > 75f)
-                
-                if (stallDetected && !isStalled) {
-                    isStalled = true
-                    stallStartTime = now
-                    stallInitialSpeedMps = rawGpsSpeedMps
-                } else if (!stallDetected && watchGpsAge < 2000L) {
-                    isStalled = false
-                }
-
-                if (isStalled) {
-                    val stallDuration = now - stallStartTime
-                    stallDecaySpeedMps = if (stallDuration >= 5000L) 0f 
-                                         else stallInitialSpeedMps * (1f - (stallDuration / 5000f))
-                }
-
-                // 3. Output Policy (v28.5)
-                val (displaySpeedMps, path) = when {
-                    anomalyType == "REAL_EVENT_CONFIRMED" -> {
-                        // GPS is auxiliary: Blend raw with average based on confidence
-                        val blended = (rawGpsSpeedMps * gpsConfidence) + ((avgSpeedKmh/MPS_TO_KMH) * (1f - gpsConfidence))
-                        blended to "REAL_EVENT_AUXILIARY"
-                    }
-                    isStalled -> stallDecaySpeedMps to "STALL_DECAY"
-                    spikeSuppressed -> (avgSpeedKmh / MPS_TO_KMH) to "SPIKE_SUPPRESSED"
-                    rawGpsSpeedMps < 0.5f || (imuMotionState == "STATIONARY" && rawGpsSpeedMps < 1.5f) -> 0f to "STATIONARY_GATE"
-                    gpsAccuracy > 100f -> 0f to "ZERO_BY_ACCURACY"
-                    else -> rawGpsSpeedMps to "PASS_THROUGH"
-                }
-                
-                displayDecisionPath = path
-                decisionReason = anomalyType.ifEmpty { path }
-                stationaryGateApplied = (displaySpeedMps == 0f && rawGpsSpeedMps > 0.1f)
-                val displaySpeedKmh = displaySpeedMps * MPS_TO_KMH
-                
-                // 4. Adaptive Sampling Logic (Rule 5)
-                loopDelay = when {
-                    displaySpeedKmh > currentSettings.highSpeedThresholdKmh -> 50L
-                    displaySpeedKmh > currentSettings.normalSpeedThresholdKmh -> 100L
-                    displaySpeedKmh > currentSettings.lowSpeedThresholdKmh -> 200L
-                    else -> 500L
-                }
-
-                val features = CrashScoreCalculator.Features(
-                    peakG = impact,
-                    deltaV = deltaV,
-                    vPre = displaySpeedKmh,
-                    gyroRms = gyroRms * (180f / Math.PI.toFloat()), // FIX: rad/s to deg/s
-                    pressureDelta = pDelta,
-                    lowG = impact < 0.3f, // Consistent with FSM
-                    pressureDrop = pDelta < -1.0f, // More robust
-                    stillTimeSec = 0f,
-                    userInput = false,
-                    rollSumDeg = Math.abs(rollDeg),
-                    hasAccel = true,
-                    hasSpeed = true, 
-                    hasGyro = gyroRms > 0.01f,
-                    hasPressure = currentPressure > 0,
-                    hasStill = true,
-                    hasRoll = Math.abs(rollDeg) > 1.0f
-                )
-                val confidence = CrashScoreCalculator.SensorConfidence(
-                    gps = gpsConfidence
-                )
-                val result = CrashScoreCalculator.computeCrashScore(features, currentSettings, confidence)
-                
-                if (result.finalScore > overallPeak.pCrashScore) {
-                    overallPeak = overallPeak.copy(
-                        pCrashScore = result.finalScore,
-                        maxImpact = if (impact > overallPeak.maxImpact) impact else overallPeak.maxImpact,
-                        pTimestamp = System.currentTimeMillis()
-                    )
-                }
-
-                if (vInferenceState == VehicleInferenceState.IDLE || vInferenceState == VehicleInferenceState.MOVING) {
-                    incidentPeakScore = 0f
-                }
-                if (result.finalScore > incidentPeakScore) {
-                    incidentPeakScore = result.finalScore
-                }
-
-                // INTEGRATION: Centralized FSM (v32.0)
-                val nextFsmState = IncidentFsm.nextState(
-                    currentState = vInferenceState,
-                    impactG = impact,
-                    speedKmh = displaySpeedKmh,
-                    currentScore = result.finalScore,
-                    peakScore = incidentPeakScore,
-                    config = currentSettings,
-                    isSimulating = isSimulatingLocked,
-                    logger = { tag, msg -> Log.d(tag, msg) }
-                )
-                
-                if (nextFsmState != vInferenceState) {
-                    setVInferenceState(nextFsmState)
-                    
-                    if (nextFsmState == VehicleInferenceState.WAIT_CONFIRM) {
-                        triggerAlertUI()
-                    }
-                }
-                
-                lastKnownState = _currentState.value
-                lastKnownVState = vInferenceState
-                
-                val currentUpdateNow = SystemClock.elapsedRealtime()
-                val currentWatchGpsAge = if (lastWatchGpsTime > 0) currentUpdateNow - lastWatchGpsTime else -1L
-                
-                gpsProviderEnabled = locationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
-                
-                val gpsUiReason = when {
-                    !gpsProviderEnabled -> "GPS_OFF"
-                    currentWatchGpsAge in 0..4999 && currentSatelliteCount >= 4 -> {
-                        if (currentReading[12] > 0 && currentReading[12] <= 25f) "FIX_3D" 
-                        else "LOW_ACC"
-                    }
-                    currentWatchGpsAge > 15000L -> "STALE"
-                    currentSatelliteCount > 0 -> "NO_FIX"
-                    else -> "SEARCHING"
-                }
-
-                val currentGpsStatus = when (gpsUiReason) {
-                    "FIX_3D" -> SensorStatus.FIX_3D
-                    "LOW_ACC" -> SensorStatus.LOW_ACC
-                    "NO_FIX" -> SensorStatus.NO_FIX
-                    "SEARCHING" -> SensorStatus.NO_FIX
-                    "GPS_OFF" -> SensorStatus.UNAVAILABLE
-                    "STALE" -> SensorStatus.UNAVAILABLE
-                    else -> SensorStatus.UNKNOWN
-                }
-
-                val isFix = currentGpsStatus == SensorStatus.FIX_3D || currentGpsStatus == SensorStatus.LOW_ACC
-                val currentGpsStatusText = when {
-                    !gpsProviderEnabled -> "Unavailable"
-                    isFix -> String.format(java.util.Locale.US, "%.1fm", currentReading[12])
-                    _currentState.value == IncidentState.MONITORING -> "Searching"
-                    else -> "Unavailable"
-                }
-
-                val offlineR = if (gpsUiReason != "FIX_3D" && gpsUiReason != "LOW_ACC") gpsUiReason else ""
-
-                updateBatteryDiagnostics()
-
-                val isMonActive = _currentState.value != IncidentState.IDLE
-                
-                // Adaptive Throttle Logic (v28.6): Ensure ~5s interval on Main even at 500ms loop
-                val throttleLimit = if (isHighSpeedSyncRequested) {
-                    THROTTLE_HIGH_SPEED 
-                } else {
-                    // If loop is 500ms, we need 10 cycles for 5s. If 200ms, we need 25.
-                    (5000 / loopDelay).toInt().coerceIn(1, 25)
-                }
-                
-                val shouldSendFullData = (telemetryCounter % throttleLimit == 0)
-                
-                // v28.6.1: Throttled status updates. 
-                // We only sync every loop in High Speed (Dash) or when Full Sync is due.
-                val shouldSyncAny = shouldSendFullData || isHighSpeedSyncRequested
-                
-                val updatedTelemetry = _telemetry.value.copy(
-                    currentImpact = impact,
-                    accelX = currentReading[0],
-                    accelY = currentReading[1],
-                    accelZ = currentReading[2],
-                    gyroX = gx,
-                    gyroY = gy,
-                    gyroZ = gz,
-                    gyroRatio = gyroRms,
-                    airPressure = currentReading[6],
-                    pressureDelta = pDelta,
-                    rollSum = Math.abs(rollDeg),
-                    gpsSpeed = displaySpeedKmh,
-                    speedRawKmh = rawGpsSpeedKmh,
-                    crashScore = result.finalScore,
-                    vehicleInferenceState = vInferenceState,
-                    
-                    isWatchGpsActive = isFix,
-                    isGpsActive = isFix,
-                    activeGpsSource = GpsMode.WATCH_ONLY,
-
-                    imuMotionState = imuMotionState,
-                    anomalyType = anomalyType,
-                    isStalled = isStalled,
-                    spikeSuppressed = spikeSuppressed,
-                    stallAgeMs = if (isStalled) now - stallStartTime else 0L,
-                    recentAvgSpeedKmh = avgSpeedKmh,
-                    satelliteCount = currentSatelliteCount,
-                    bearingChangeDeg = bearingChange,
-                    
-                    gpsConfidence = gpsConfidence,
-                    callbackContinuityScore = callbackContinuityScore,
-                    realEventConfidence = realEventConfidence,
-                    displayDecisionPath = displayDecisionPath,
-
-                    currentGpsWeight = currentGpsWeight,
-                    currentImuWeight = currentImuWeight,
-                    continuityWeight = continuityWeight,
-                    displacementWeight = displacementWeight,
-                    bearingWeight = bearingWeight,
-                    
-                    hbAgeMs = if (lastHeartbeatTime > 0) SystemClock.elapsedRealtime() - lastHeartbeatTime else -1L,
-                    offlineReason = offlineR,
-                    wearTimestamp = System.currentTimeMillis(),
-                    lastUpdateTime = System.currentTimeMillis(),
-                    
-                    pCrashScore = overallPeak.pCrashScore,
-                    maxImpact = overallPeak.maxImpact,
-                    pTimestamp = overallPeak.pTimestamp,
-
-                    // Detailed Diagnostics (v28.5)
-                    gpsProviderEnabled = gpsProviderEnabled,
-                    gnssSignalSeen = gnssSignalSeen,
-                    lastLocationReceivedAt = lastWatchGpsTime,
-                    watchGpsAgeMs = watchGpsAge,
-                    lastLat = lastLat,
-                    lastLon = lastLon,
-                    lastSpeedMps = rawGpsSpeedMps,
-                    lastAccuracyM = currentReading[12],
-                    gpsUiReason = gpsUiReason,
-                    
-                    displacementM = lastDisplacement,
-                    stationaryGateApplied = stationaryGateApplied,
-                    speedReason = decisionReason,
-                    decisionReason = decisionReason,
-                    
-                    batteryLevel = lastBatteryLevel,
-                    batteryChangePerHour = batteryConsumptionPerHour,
-
-                    // Phase 7: Sync & Indicator Diagnostics (v28.6.2)
-                    // Keep hardware status even when IDLE to support Pull-to-Refresh visibility
-                    accelStatus = getSensorStatus(Sensor.TYPE_ACCELEROMETER),
-                    gyroStatus = getSensorStatus(Sensor.TYPE_GYROSCOPE),
-                    pressureStatus = getSensorStatus(Sensor.TYPE_PRESSURE),
-                    rotationStatus = getSensorStatus(Sensor.TYPE_ROTATION_VECTOR),
-                    syncReason = if (shouldSendFullData) "FULL_SYNC" else "STATUS_ONLY",
-                    
-                    // GPS UI Status Mapping (v28.6.1)
-                    gpsStatus = currentGpsStatus,
-                    gpsStatusText = currentGpsStatusText
-                )
-                
-                _telemetry.value = updatedTelemetry
-                
-                // 1. Live Data Sync to Mobile Dashboard (Throttled)
-                if (shouldSyncAny) {
-                    sendTelemetryToPhone(updatedTelemetry, fullSync = shouldSendFullData)
-                }
-
-                // 2. High-Fidelity EDR Recording (v28.7)
-                val currentPoint = TelemetryPoint(
-                    time = readablePointFormat.format(Date(updatedTelemetry.wearTimestamp)),
-                    t = updatedTelemetry.wearTimestamp,
-                    offset = 0, // Placeholder
-                    ax = updatedTelemetry.accelX,
-                    ay = updatedTelemetry.accelY,
-                    az = updatedTelemetry.accelZ,
-                    gx = updatedTelemetry.gyroX,
-                    gy = updatedTelemetry.gyroY,
-                    gz = updatedTelemetry.gyroZ,
-                    pres = updatedTelemetry.airPressure,
-                    spd = updatedTelemetry.gpsSpeed,
-                    mag = impact,
-                    rx = currentReading[7],
-                    ry = currentReading[8],
-                    rz = currentReading[9],
-                    rw = currentReading[10],
-                    lat = if (updatedTelemetry.gpsStatus == SensorStatus.FIX_3D) updatedTelemetry.lastLat else null,
-                    lon = if (updatedTelemetry.gpsStatus == SensorStatus.FIX_3D) updatedTelemetry.lastLon else null
-                )
-
-                // Manage 5s Pre-Incident Buffer (RAM Cache)
-                // Period is loopDelay. At 500ms (IDLE), 10 points = 5s.
-                // At 100ms (MOVING), 50 points = 5s.
-                edrBuffer.add(currentPoint)
-                val bufferPointLimit = (5000 / loopDelay).toInt().coerceAtLeast(10)
-                while (edrBuffer.size > bufferPointLimit) {
-                    edrBuffer.removeAt(0)
-                }
-
-                // If incident is active, also append to the active recording buffer
-                if (mediaRecorder != null) {
-                    edrActiveBuffer.add(currentPoint)
-                }
-
-                // 3. Low-Frequency Historical Logging (v27.6)
-                if (isMonActive) {
-                    val entry = TelemetryLogEntry(
-                        timestamp = updatedTelemetry.wearTimestamp,
-                        readableTime = logDateFormat.format(Date(updatedTelemetry.wearTimestamp)),
-                        ax = updatedTelemetry.accelX,
-                        ay = updatedTelemetry.accelY,
-                        az = updatedTelemetry.accelZ,
-                        gx = updatedTelemetry.gyroX,
-                        gy = updatedTelemetry.gyroY,
-                        gz = updatedTelemetry.gyroZ,
-                        pressure = updatedTelemetry.airPressure,
-                        rx = currentReading[7],
-                        ry = currentReading[8],
-                        rz = currentReading[9],
-                        rw = currentReading[10],
-                        speed = updatedTelemetry.gpsSpeed,
-                        latitude = updatedTelemetry.lastLat,
-                        longitude = updatedTelemetry.lastLon,
-                        gpsStatus = updatedTelemetry.gpsStatusText,
-                        crashScore = updatedTelemetry.crashScore,
-                        fsmState = vInferenceState.name
-                    )
-                    logBuffer.add(entry)
-
-                    val nowTime = System.currentTimeMillis()
-                    if (nowTime - lastBatchSaveTime >= 60000 || logBuffer.size >= 300) {
-                        val batch = TelemetryLogBatch(entries = logBuffer.toList())
-                        logBuffer.clear()
-                        lastBatchSaveTime = nowTime
-                        serviceScope.launch {
-                            logStore.saveBatch(batch)
-                        }
-                    }
-                }
-
-                // Periodic Upload logic (v27.6)
-                val nowTime = System.currentTimeMillis()
-                if (nowTime - lastLogUploadTime >= 3600000) { // Every 1 hour
-                    lastLogUploadTime = nowTime
-                    serviceScope.launch {
-                        uploadPendingLogs()
-                    }
-                }
-
-                telemetryCounter++
-
-                // Rule 5: Adaptive Sampling (v28.4 Tiered)
-                loopDelay = when {
-                    displaySpeedKmh > currentSettings.highSpeedThresholdKmh -> 50L
-                    displaySpeedKmh > currentSettings.normalSpeedThresholdKmh -> 100L
-                    displaySpeedKmh > currentSettings.lowSpeedThresholdKmh -> 200L
-                    else -> 500L
+                try {
+                    processTelemetryCycle(readingSnapshot, startTime)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Processing loop error: ${e.message}", e)
                 }
 
                 val elapsed = SystemClock.elapsedRealtime() - startTime
-                val sleepTime = Math.max(0L, loopDelay - elapsed)
+                val sleepTime = (loopDelay - elapsed).coerceAtLeast(0L)
                 delay(sleepTime)
             }
         }
+    }
+
+    private fun processTelemetryCycle(readingSnapshot: FloatArray, startTime: Long) {
+        synchronized(currentReading) {
+            currentReading.copyInto(readingSnapshot)
+        }
+        
+        val nowTime = System.currentTimeMillis()
+        val ax = readingSnapshot[0]; val ay = readingSnapshot[1]; val az = readingSnapshot[2]
+        val impact = Math.sqrt((ax*ax + ay*ay + az*az).toDouble()).toFloat() / gEarth
+        
+        val gx = readingSnapshot[3]; val gy = readingSnapshot[4]; val gz = readingSnapshot[5]
+        val gyroRms = Math.sqrt((gx*gx + gy*gy + gz*gz).toDouble()).toFloat()
+        
+        updateImuMotionState(impact, gyroRms)
+
+        val currentPressure = readingSnapshot[6]
+        val pDelta = if (baselinePressure > 0f) currentPressure - baselinePressure else 0f
+        
+        val rotVec = readingSnapshot.sliceArray(7..10)
+        val rollDeg = calculateRoll(rotVec)
+
+        val rawGpsSpeedMps = readingSnapshot[11]
+        val rawGpsSpeedKmh = rawGpsSpeedMps * mpsToKmh
+        val gpsAccuracy = readingSnapshot[12]
+        val currentBearing = readingSnapshot[13]
+        
+        val now = SystemClock.elapsedRealtime()
+        val watchGpsAge = if (lastWatchGpsTime > 0) now - lastWatchGpsTime else -1L
+        
+        var displacementScore = 1.0f
+
+        if (!isSimulatingLocked) {
+            callbackContinuityScore = if (lastLocationInterval > 0) {
+                Math.max(0f, 1f - (Math.abs(lastLocationInterval - 1000f) / 3000f))
+            } else 0.5f
+
+            val expectedDisplacement = rawGpsSpeedMps * (lastLocationInterval / 1000f)
+            displacementScore = if (expectedDisplacement > 0.5f) {
+                Math.min(1.2f, lastDisplacement / expectedDisplacement).coerceIn(0f, 1f)
+            } else 1.0f
+
+            val accScore = Math.max(0f, 1f - (gpsAccuracy / 80f))
+            val ageScore = if (watchGpsAge >= 0) Math.max(0f, 1f - (watchGpsAge / 10000f)) else 0f
+            val satScore = Math.min(1f, currentSatelliteCount / 6f)
+            
+            bearingChange = Math.abs(currentBearing - lastBearing)
+            if (bearingChange > 180) bearingChange = 360 - bearingChange
+            lastBearing = currentBearing
+            val bearingScore = Math.max(0f, 1f - (bearingChange / 90f))
+
+            val (cW, dW, bW, iW, gW) = if (rawGpsSpeedKmh > 20f) {
+                listOf(0.15f, 0.20f, 0.25f, 0.20f, 0.20f)
+            } else {
+                listOf(0.30f, 0.40f, 0.05f, 0.15f, 0.10f)
+            }
+            
+            val gpsInternal = (accScore * 0.4f + ageScore * 0.3f + satScore * 0.3f)
+            gpsConfidence = (gpsInternal * gW + 
+                            displacementScore * dW + 
+                            bearingScore * bW + 
+                            (1f - realEventConfidence) * iW + 
+                            callbackContinuityScore * cW)
+
+            realEventConfidence = Math.min(1f, Math.max(0f, (impact - 1.2f) / 2.0f) + (gyroRms / 150f))
+
+            if (rawGpsSpeedKmh > 0.1f) {
+                speedHistory.add(rawGpsSpeedKmh)
+                if (speedHistory.size > 25) speedHistory.removeAt(0)
+            }
+        }
+
+        val avgSpeedKmh = if (speedHistory.isNotEmpty()) speedHistory.average().toFloat() else 0f
+        val maxSpeedRecent = if (speedHistory.isNotEmpty()) speedHistory.maxOrNull() ?: 0f else 0f
+        val deltaV = (maxSpeedRecent - rawGpsSpeedKmh).coerceAtLeast(0f)
+
+        anomalyType = "NONE"
+        val isIndoorPossible = (imuMotionState == "STATIONARY") && (gpsAccuracy > 25f || currentSatelliteCount < 4 || watchGpsAge > 3000)
+        val isIndoorSpike = isIndoorPossible && (rawGpsSpeedKmh > avgSpeedKmh + 25f) && (callbackContinuityScore < 0.7f)
+        val isDriftSpike = (rawGpsSpeedKmh > 8f) && (displacementScore < 0.15f) && (imuMotionState == "STATIONARY")
+        val isBearingAnomaly = (bearingChange > 100f) && (rawGpsSpeedKmh > 25f) && (imuMotionState != "ACTIVE_HIGH")
+        
+        if (isIndoorSpike) anomalyType = "INDOOR_SPIKE"
+        else if (isDriftSpike) anomalyType = "DRIFT_SPIKE"
+        else if (isBearingAnomaly) anomalyType = "BEARING_ANOMALY"
+
+        val isRealEventConfirmed = (rawGpsSpeedKmh > 3f) && (imuMotionState == "ACTIVE_HIGH")
+        if (isRealEventConfirmed) anomalyType = "REAL_EVENT_CONFIRMED"
+
+        spikeSuppressed = (anomalyType != "NONE" && anomalyType != "REAL_EVENT_CONFIRMED")
+
+        val stallDetected = (watchGpsAge > 4000L && rawGpsSpeedMps > 0.5f) || 
+                        (currentSatelliteCount < 3 && rawGpsSpeedMps > 2.0f) || 
+                        (gpsAccuracy > 75f)
+        
+        if (stallDetected && !isStalled) {
+            isStalled = true
+            stallStartTime = now
+            stallInitialSpeedMps = rawGpsSpeedMps
+        } else if (!stallDetected && watchGpsAge < 2000L) {
+            isStalled = false
+        }
+
+        if (isStalled) {
+            val stallDuration = now - stallStartTime
+            stallDecaySpeedMps = if (stallDuration >= 5000L) 0f 
+                                else stallInitialSpeedMps * (1f - (stallDuration / 5000f))
+        }
+
+        val (displaySpeedMps, path) = when {
+            anomalyType == "REAL_EVENT_CONFIRMED" -> {
+                val blended = (rawGpsSpeedMps * gpsConfidence) + ((avgSpeedKmh/mpsToKmh) * (1f - gpsConfidence))
+                blended to "REAL_EVENT_AUXILIARY"
+            }
+            isStalled -> stallDecaySpeedMps to "STALL_DECAY"
+            spikeSuppressed -> (avgSpeedKmh / mpsToKmh) to "SPIKE_SUPPRESSED"
+            rawGpsSpeedMps < 0.5f || (imuMotionState == "STATIONARY" && rawGpsSpeedMps < 1.5f) -> 0f to "STATIONARY_GATE"
+            gpsAccuracy > 100f -> 0f to "ZERO_BY_ACCURACY"
+            else -> rawGpsSpeedMps to "PASS_THROUGH"
+        }
+        
+        decisionReason = anomalyType.ifEmpty { path }
+        val stationaryGateApplied = (displaySpeedMps == 0f && rawGpsSpeedMps > 0.1f)
+        val displaySpeedKmh = displaySpeedMps * mpsToKmh
+        
+        loopDelay = when {
+            displaySpeedKmh > currentSettings.highSpeedThresholdKmh -> 50L
+            displaySpeedKmh > currentSettings.normalSpeedThresholdKmh -> 100L
+            displaySpeedKmh > currentSettings.lowSpeedThresholdKmh -> 200L
+            else -> 500L
+        }
+
+        val features = CrashScoreCalculator.Features(
+            peakG = impact, deltaV = deltaV, vPre = displaySpeedKmh,
+            gyroRms = gyroRms * (180f / Math.PI.toFloat()),
+            pressureDelta = pDelta, lowG = impact < 0.3f, pressureDrop = pDelta < -1.0f,
+            stillTimeSec = 0f, userInput = false, rollSumDeg = Math.abs(rollDeg),
+            hasAccel = true, hasSpeed = true, hasGyro = gyroRms > 0.01f,
+            hasPressure = currentPressure > 0, hasStill = true, hasRoll = Math.abs(rollDeg) > 1.0f
+        )
+        val result = CrashScoreCalculator.computeCrashScore(features, currentSettings, CrashScoreCalculator.SensorConfidence(gpsConfidence))
+        
+        val nowMs = System.currentTimeMillis()
+        var op = overallPeak
+        if (impact > op.maxImpact) op = op.copy(maxImpact = impact, pTimestamp = nowMs)
+        if (result.finalScore > op.pCrashScore) op = op.copy(pCrashScore = result.finalScore, pTimestamp = nowMs)
+        if (deltaV > op.maxSpeedDrop) op = op.copy(maxSpeedDrop = deltaV, pTimestamp = nowMs)
+        if (Math.abs(rollDeg) > op.pRollSum) op = op.copy(pRollSum = Math.abs(rollDeg), pTimestamp = nowMs)
+        if (Math.abs(pDelta) > op.pPressureDelta) op = op.copy(pPressureDelta = Math.abs(pDelta), pTimestamp = nowMs)
+        if (displaySpeedKmh > op.pGpsSpeed) op = op.copy(pGpsSpeed = displaySpeedKmh, pTimestamp = nowMs)
+        if (Math.abs(readingSnapshot[1]) > op.maxLongitudinalG) op = op.copy(maxLongitudinalG = Math.abs(readingSnapshot[1]), pTimestamp = nowMs)
+        if (Math.abs(readingSnapshot[0]) > op.maxLateralG) op = op.copy(maxLateralG = Math.abs(readingSnapshot[0]), pTimestamp = nowMs)
+        if (Math.abs(readingSnapshot[0]) > Math.abs(op.pAccelX)) op = op.copy(pAccelX = readingSnapshot[0])
+        if (Math.abs(readingSnapshot[1]) > Math.abs(op.pAccelY)) op = op.copy(pAccelY = readingSnapshot[1])
+        if (Math.abs(readingSnapshot[2]) > Math.abs(op.pAccelZ)) op = op.copy(pAccelZ = readingSnapshot[2])
+        overallPeak = op
+
+        peakHistory.add(nowMs to floatArrayOf(
+            impact, result.finalScore, deltaV, Math.abs(rollDeg), Math.abs(pDelta),
+            Math.abs(readingSnapshot[1]), Math.abs(readingSnapshot[0]), displaySpeedKmh
+        ))
+        peakHistory.removeIf { it.first < nowMs - peakHistoryWindowMs }
+        
+        val relevantHistory = peakHistory.filter { it.first >= nowMs - requestedWindowMs }
+        windowPeak = windowPeak.copy(
+            windowImpact = relevantHistory.maxOfOrNull { it.second[0] } ?: 0f,
+            wCrashScore = relevantHistory.maxOfOrNull { it.second[1] } ?: 0f,
+            wMaxSpeedDrop = relevantHistory.maxOfOrNull { it.second[2] } ?: 0f,
+            wRollSum = relevantHistory.maxOfOrNull { it.second[3] } ?: 0f,
+            wPressureDelta = relevantHistory.maxOfOrNull { it.second[4] } ?: 0f,
+            wMaxLongitudinalG = relevantHistory.maxOfOrNull { it.second[5] } ?: 0f,
+            wMaxLateralG = relevantHistory.maxOfOrNull { it.second[6] } ?: 0f,
+            wGpsSpeed = relevantHistory.maxOfOrNull { it.second[7] } ?: 0f,
+            wTimestamp = nowMs
+        )
+
+        if (vInferenceState == VehicleInferenceState.IDLE || vInferenceState == VehicleInferenceState.MOVING) incidentPeakScore = 0f
+        if (result.finalScore > incidentPeakScore) incidentPeakScore = result.finalScore
+
+        val nextFsmState = IncidentFsm.nextState(vInferenceState, impact, displaySpeedKmh, result.finalScore, incidentPeakScore, currentSettings, isSimulatingLocked) { t, m -> Log.d(t, m) }
+        if (nextFsmState != vInferenceState) {
+            setVInferenceState(nextFsmState)
+            if (nextFsmState == VehicleInferenceState.WAIT_CONFIRM) triggerAlertUI()
+        }
+        
+        gpsProviderEnabled = locationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
+        val currentUpdateNow = SystemClock.elapsedRealtime()
+        val cWAge = if (lastWatchGpsTime > 0) currentUpdateNow - lastWatchGpsTime else -1L
+        val cNAge = if (lastNetworkTime > 0) currentUpdateNow - lastNetworkTime else -1L
+        
+        if (!isSimulatingLocked) {
+            currentGpsMode = when {
+                cWAge in 0..10000L && cNAge in 0..10000L -> GpsMode.WATCH_HYBRID
+                cWAge in 0..10000L -> GpsMode.WATCH_ONLY
+                cNAge in 0..20000L -> GpsMode.WATCH_NETWORK_ONLY
+                else -> GpsMode.WATCH_ONLY
+            }
+        }
+
+        val gpsUiR = when {
+            !gpsProviderEnabled -> "GPS_OFF"
+            cWAge in 0..4999 && currentSatelliteCount >= 4 -> if (readingSnapshot[12] <= 25f) "FIX_3D" else "LOW_ACC"
+            cWAge > 15000L -> "STALE"
+            currentSatelliteCount > 0 -> "NO_FIX"
+            else -> "SEARCHING"
+        }
+
+        val cGpsStatus = when (gpsUiR) {
+            "FIX_3D" -> SensorStatus.FIX_3D
+            "LOW_ACC" -> SensorStatus.LOW_ACC
+            "NO_FIX", "SEARCHING" -> SensorStatus.NO_FIX
+            "GPS_OFF", "STALE" -> SensorStatus.UNAVAILABLE
+            else -> SensorStatus.UNKNOWN
+        }
+
+        val isFix = cGpsStatus == SensorStatus.FIX_3D || cGpsStatus == SensorStatus.LOW_ACC
+        val cGpsStatusText = when {
+            !gpsProviderEnabled -> "Unavailable"
+            isFix -> String.format(Locale.US, "%.1fm", readingSnapshot[12])
+            _currentState.value == IncidentState.MONITORING -> "Searching"
+            else -> "Unavailable"
+        }
+
+        updateBatteryDiagnostics()
+
+        val isIncidentActive = vInferenceState != VehicleInferenceState.IDLE && vInferenceState != VehicleInferenceState.MOVING
+        val shouldDataSyncNow = vInferenceState != lastReportedFsmState || _currentState.value != lastReportedState || (nowTime - lastFullTelemetrySyncTime >= 600000L)
+        
+        val updatedTelemetry = _telemetry.value.copy(
+            currentImpact = impact, accelX = readingSnapshot[0], accelY = readingSnapshot[1], accelZ = readingSnapshot[2],
+            gyroX = gx, gyroY = gy, gyroZ = gz, airPressure = readingSnapshot[6], pressureDelta = pDelta, rollSum = Math.abs(rollDeg),
+            gpsSpeed = displaySpeedKmh, speedRawKmh = rawGpsSpeedKmh, crashScore = result.finalScore, vehicleInferenceState = vInferenceState,
+            isWatchGpsActive = isFix, isGpsActive = isFix, activeGpsSource = currentGpsMode, imuMotionState = imuMotionState,
+            anomalyType = anomalyType, isStalled = isStalled, spikeSuppressed = spikeSuppressed, satelliteCount = currentSatelliteCount,
+            bearingChangeDeg = bearingChange, hbAgeMs = if (lastHeartbeatTime > 0) SystemClock.elapsedRealtime() - lastHeartbeatTime else -1L,
+            offlineReason = if (gpsUiR != "FIX_3D" && gpsUiR != "LOW_ACC") gpsUiR else "", wearTimestamp = nowMs, lastUpdateTime = nowMs,
+            pCrashScore = op.pCrashScore, maxImpact = op.maxImpact, pTimestamp = op.pTimestamp, pGpsSpeed = op.pGpsSpeed,
+            pAccelX = op.pAccelX, pAccelY = op.pAccelY, pAccelZ = op.pAccelZ, maxLongitudinalG = op.maxLongitudinalG, maxLateralG = op.maxLateralG,
+            maxSpeedDrop = op.maxSpeedDrop, pRollSum = op.pRollSum, pPressureDelta = op.pPressureDelta,
+            wCrashScore = windowPeak.wCrashScore, windowImpact = windowPeak.windowImpact, wMaxSpeedDrop = windowPeak.wMaxSpeedDrop,
+            wGpsSpeed = windowPeak.wGpsSpeed, wRollSum = windowPeak.wRollSum, wPressureDelta = windowPeak.wPressureDelta,
+            wMaxLongitudinalG = windowPeak.wMaxLongitudinalG, wMaxLateralG = windowPeak.wMaxLateralG, wTimestamp = windowPeak.wTimestamp,
+            gpsProviderEnabled = gpsProviderEnabled, gnssSignalSeen = gnssSignalSeen, lastLocationReceivedAt = lastWatchGpsTime,
+            watchGpsAgeMs = cWAge, lastLat = lastLat, lastLon = lastLon, lastAccuracyM = readingSnapshot[12],
+            stationaryGateApplied = stationaryGateApplied, speedReason = decisionReason, batteryLevel = lastBatteryLevel,
+            batteryChangePerHour = batteryConsumptionPerHour, accelStatus = getSensorStatus(Sensor.TYPE_ACCELEROMETER),
+            gyroStatus = getSensorStatus(Sensor.TYPE_GYROSCOPE), pressureStatus = getSensorStatus(Sensor.TYPE_PRESSURE),
+            rotationStatus = getSensorStatus(Sensor.TYPE_ROTATION_VECTOR), gpsStatus = cGpsStatus, gpsStatusText = cGpsStatusText
+        )
+        
+        _telemetry.value = updatedTelemetry
+        if (shouldDataSyncNow) {
+            sendTelemetryToPhone(updatedTelemetry, fullSync = true)
+            lastFullTelemetrySyncTime = nowTime
+            lastReportedState = _currentState.value
+            lastReportedFsmState = vInferenceState
+        }
+
+        if (isHighSpeedSyncRequested || isIncidentActive) {
+            if (startTime - lastDashboardStreamTime >= 200L) {
+                streamTelemetryToDashboard(updatedTelemetry)
+                lastDashboardStreamTime = startTime
+            }
+        }
+
+        val currentPoint = TelemetryPoint(
+            time = readablePointFormat.format(Date(nowMs)), t = nowMs, offset = 0,
+            ax = updatedTelemetry.accelX, ay = updatedTelemetry.accelY, az = updatedTelemetry.accelZ,
+            gx = updatedTelemetry.gyroX, gy = updatedTelemetry.gyroY, gz = updatedTelemetry.gyroZ,
+            pres = updatedTelemetry.airPressure, spd = updatedTelemetry.gpsSpeed, mag = impact,
+            rx = readingSnapshot[7], ry = readingSnapshot[8], rz = readingSnapshot[9], rw = readingSnapshot[10],
+            lat = if (updatedTelemetry.lastLat != 0.0) updatedTelemetry.lastLat else null,
+            lon = if (updatedTelemetry.lastLon != 0.0) updatedTelemetry.lastLon else null
+        )
+
+        edrBuffer.add(currentPoint)
+        while (edrBuffer.size > (5000 / loopDelay).toInt().coerceAtLeast(10)) edrBuffer.removeAt(0)
+        if (mediaRecorder != null) edrActiveBuffer.add(currentPoint)
+
+        if (_currentState.value != IncidentState.IDLE) {
+            logBuffer.add(TelemetryLogEntry(
+                timestamp = nowMs, readableTime = logDateFormat.format(Date(nowMs)),
+                ax = updatedTelemetry.accelX, ay = updatedTelemetry.accelY, az = updatedTelemetry.accelZ,
+                gx = updatedTelemetry.gyroX, gy = updatedTelemetry.gyroY, gz = updatedTelemetry.gyroZ,
+                pressure = updatedTelemetry.airPressure, rx = readingSnapshot[7], ry = readingSnapshot[8],
+                rz = readingSnapshot[9], rw = readingSnapshot[10], speed = updatedTelemetry.gpsSpeed,
+                latitude = updatedTelemetry.lastLat, longitude = updatedTelemetry.lastLon,
+                gpsStatus = updatedTelemetry.gpsStatusText, crashScore = updatedTelemetry.crashScore,
+                fsmState = vInferenceState.name
+            ))
+            if (nowMs - lastBatchSaveTime >= 60000 || logBuffer.size >= 300) {
+                val batch = TelemetryLogBatch(entries = logBuffer.toList())
+                logBuffer.clear()
+                lastBatchSaveTime = nowMs
+                serviceScope.launch { logStore.saveBatch(batch) }
+            }
+        }
+
+        if (nowTime - lastLogUploadTime >= 3600000) {
+            lastLogUploadTime = nowTime
+            serviceScope.launch { uploadPendingLogs() }
+        }
+        telemetryCounter++
     }
 
     private fun getSensorStatus(type: Int): SensorStatus {
@@ -924,100 +842,76 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         serviceScope.launch {
             if (!dataClientMutex.tryLock()) return@launch
             try {
-                val isActive = _currentState.value != IncidentState.IDLE
-                val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
-                    dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, isActive)
-                    dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
-                    dataMap.putString(ProtocolContract.Keys.LOC_STATUS, currentGpsMode.name)
+                withTimeoutOrNull(5000L) {
+                    val isActive = _currentState.value != IncidentState.IDLE
+                    val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
+                        dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, isActive)
+                        dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+                        dataMap.putString(ProtocolContract.Keys.LOC_STATUS, currentGpsMode.name)
+                        dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, telemetry.accelStatus.name)
+                        dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, telemetry.gyroStatus.name)
+                        dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, telemetry.pressureStatus.name)
+                        dataMap.putString(ProtocolContract.Keys.ROT_STATUS, telemetry.rotationStatus.name)
+                        dataMap.putString(ProtocolContract.Keys.WATCH_GPS_STATUS, telemetry.gpsStatus.name)
+                        dataMap.putString(ProtocolContract.Keys.WATCH_GPS_TEXT, telemetry.gpsStatusText)
+                        if (fullSync || !isActive) {
+                            val json = withContext(Dispatchers.IO) { Json.encodeToString(telemetry) }
+                            dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, json)
+                        }
+                        setUrgent()
+                    }.asPutDataRequest()
+                    Wearable.getDataClient(this@SentinelService).putDataItem(putDataReq).await()
+                }
+            } catch (e: Exception) { Log.e(TAG, "Sync fail", e) }
+            finally { dataClientMutex.unlock() }
+        }
+    }
 
-                    // Phase 7: Always include core status to prevent UI "Unknown" flickering (v28.6)
-                    dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, telemetry.accelStatus.name)
-                    dataMap.putString(ProtocolContract.Keys.GYRO_STATUS, telemetry.gyroStatus.name)
-                    dataMap.putString(ProtocolContract.Keys.PRESS_STATUS, telemetry.pressureStatus.name)
-                    dataMap.putString(ProtocolContract.Keys.ROT_STATUS, telemetry.rotationStatus.name)
-                    
-                    dataMap.putString(ProtocolContract.Keys.WATCH_GPS_STATUS, telemetry.gpsStatus.name)
-                    dataMap.putString(ProtocolContract.Keys.WATCH_GPS_TEXT, telemetry.gpsStatusText)
-
-                    if (fullSync || !isActive) { // Always full sync when stopping or if requested
-                        val json = prettyJson.encodeToString(telemetry)
-                        dataMap.putString(ProtocolContract.Keys.TELEMETRY_JSON, json)
-                    }
-                    setUrgent()
-                }.asPutDataRequest()
-                Wearable.getDataClient(this@SentinelService).putDataItem(putDataReq).await()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send telemetry", e)
-            } finally {
-                dataClientMutex.unlock()
-            }
+    private fun streamTelemetryToDashboard(telemetry: TelemetryState) {
+        serviceScope.launch {
+            if (!dashboardStreamMutex.tryLock()) return@launch
+            try {
+                val json = withContext(Dispatchers.IO) { Json.encodeToString(telemetry) }
+                val data = json.toByteArray()
+                val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
+                for (node in nodes) {
+                    Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.DASHBOARD_DATA, data)
+                }
+            } catch (e: Exception) { Log.e(TAG, "Stream fail", e) }
+            finally { dashboardStreamMutex.unlock() }
         }
     }
 
     private suspend fun uploadPendingLogs() {
         try {
-            val batches = logStore.getPendingBatches()
-            if (batches.isEmpty()) return
-            
-            val nodeClient = Wearable.getNodeClient(this)
-            val messageClient = Wearable.getMessageClient(this)
-            
-            val nodes = nodeClient.connectedNodes.await()
-            if (nodes.isEmpty()) {
-                Log.w(TAG, "No nodes connected, skipping log upload")
-                return
+            val oldest = logStore.getOldestBatch() ?: return
+            val (file, batch) = oldest
+            val nodes = Wearable.getNodeClient(this).connectedNodes.await()
+            if (nodes.isEmpty()) return
+            val json = prettyJson.encodeToString(batch)
+            val data = json.toByteArray()
+            for (node in nodes) {
+                Wearable.getMessageClient(this).sendMessage(node.id, ProtocolContract.Paths.TELEMETRY_LOG, data).await()
             }
-
-            for ((file, batch) in batches) {
-                val json = prettyJson.encodeToString(batch)
-                val data = json.toByteArray()
-                
-                for (node in nodes) {
-                    messageClient.sendMessage(
-                        node.id,
-                        ProtocolContract.Paths.TELEMETRY_LOG,
-                        data
-                    ).await()
-                }
-
-                logStore.deleteFile(file)
-                Log.d(TAG, "Uploaded telemetry batch: ${file.name}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to upload logs", e)
-        }
-    }
-
-    private fun calculateCurrentImpact(): Float {
-        val ax = currentReading[0]; val ay = currentReading[1]; val az = currentReading[2]
-        return Math.sqrt((ax*ax + ay*ay + az*az).toDouble()).toFloat() / G_EARTH
+            logStore.deleteFile(file)
+        } catch (e: Exception) { Log.e(TAG, "Log upload fail", e) }
     }
 
     private fun setVInferenceState(newState: VehicleInferenceState) {
         if (vInferenceState != newState) {
-            Log.d(TAG, "FSM State Changed: $newState")
             vInferenceState = newState
-            lastKnownVState = newState
             SentinelComplicationService.update(this)
-            
-            if (newState == VehicleInferenceState.IMPACT) {
-                startAudioRecording()
-            }
+            if (newState == VehicleInferenceState.IMPACT) startAudioRecording()
         }
     }
 
-    /**
-     * Long-term fail-safe retry mechanism (v32.0).
-     * Periodically checks for incidents that failed to transfer immediately.
-     */
     private var failSafeRetryJob: Job? = null
-    
     private fun startFailSafeRetryLoop() {
         if (failSafeRetryJob?.isActive == true) return
         failSafeRetryJob = serviceScope.launch {
             while (isActive) {
                 retryPendingIncidents()
-                delay(300000L) // Every 5 minutes
+                delay(300000L)
             }
         }
     }
@@ -1026,114 +920,118 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         try {
             val pending = assetStore.getPendingIncidents()
             if (pending.isEmpty()) return
-            
             val nodes = Wearable.getNodeClient(this).connectedNodes.await()
             if (nodes.isEmpty()) return
-
-            Log.i(TAG, "🔄 Fail-Safe: Retrying ${pending.size} pending incidents...")
             for ((_, record) in pending) {
-                // Simple logic: re-send EDR and then check for audio
-                val nodes = Wearable.getNodeClient(this).connectedNodes.await()
                 var edrSent = false
                 for (node in nodes) {
                     try {
-                        Wearable.getMessageClient(this)
-                            .sendMessage(node.id, ProtocolContract.Paths.INCIDENT_REPORT, record.edrJson.toByteArray())
-                            .await()
+                        Wearable.getMessageClient(this).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_REPORT, record.edrJson.toByteArray()).await()
                         edrSent = true
                     } catch (e: Exception) {}
                 }
-                
-                if (edrSent) {
-                    Log.i(TAG, "✅ Fail-Safe: EDR recovered for ${record.id}")
-                    assetStore.deletePendingIncident(record.id)
-                }
+                if (edrSent) assetStore.deletePendingIncident(record.id)
             }
-            
-            // Audio files are kept in cache and managed by transferAudioEvidenceOnly 
-            // if we were to implement a more complex tracking system.
-        } catch (e: Exception) {
-            Log.e(TAG, "Fail-Safe retry failed: ${e.message}")
-        }
+        } catch (e: Exception) { Log.e(TAG, "Retry fail", e) }
     }
 
     private fun startMonitoringLogic() {
+        if (_currentState.value == IncidentState.MONITORING) return
         _currentState.value = IncidentState.MONITORING
-        lastKnownState = IncidentState.MONITORING
         serviceScope.launch { settingsRepository.updateMonitoringState(IncidentState.MONITORING.name) }
         baselinePressure = 0f
         startWatchGps()
         startFailSafeRetryLoop()
-        // Phase 7: Immediate sync on start to update Mobile UI (v28.6)
         sendTelemetryToPhone(_telemetry.value, fullSync = true)
         SentinelComplicationService.update(this)
     }
 
     private fun triggerAlertUI() {
-        // 1. Capture EDR Data and Logic for Alert UI and Remote Notification (Always run)
         serviceScope.launch {
             try {
-                // IMPORTANT: Capture the 5s pre-incident window IMMEDIATELY
                 val edrSnapshot = edrBuffer.toList()
-                
-                // Initialize Active EDR Buffer with the snapshot (for the next 25s of audio)
                 edrActiveBuffer.clear()
                 edrActiveBuffer.addAll(edrSnapshot)
+                
+                // v33.9: Continuous High-Intensity Service Vibration as Fail-safe
+                val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION") getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                }
+                serviceVibrator = vib
+                val effect = VibrationEffect.createWaveform(longArrayOf(0, 1000, 200), 0) // Repeating
+                vib.vibrate(effect)
 
-                // A. Local Alert (Watch)
-                val intent = Intent(this@SentinelService, IncidentAlertActivity::class.java).apply {
+                // v34.1: Use BroadcastReceiver to bridge Activity launch (Most reliable BAL bypass)
+                val alertIntent = Intent(this@SentinelService, IncidentAlertActivity.AlertReceiver::class.java).apply {
                     putExtra("reason", if (isSimulatingLocked) "SIMULATION" else "CRASH DETECTED")
                     putExtra("timestamp", System.currentTimeMillis())
                     putExtra("maxG", overallPeak.pCrashScore)
                     putExtra("speed", overallPeak.pGpsSpeed)
                     if (_telemetry.value.lastLat != 0.0) {
-                        putExtra("lat", _telemetry.value.lastLat)
-                        putExtra("lon", _telemetry.value.lastLon)
+                        putExtra("lat", _telemetry.value.lastLat); putExtra("lon", _telemetry.value.lastLon)
+                        putExtra("last_lat", _telemetry.value.lastLat); putExtra("last_lon", _telemetry.value.lastLon)
                         putExtra("has_location", true)
-                    } else {
-                        putExtra("has_location", false)
-                    }
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    } else putExtra("has_location", false)
                 }
-                startActivity(intent)
+                
+                val pendingIntent = PendingIntent.getBroadcast(
+                    this@SentinelService, 0, alertIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
 
-                // B. Immediate EDR Report Transfer (Don't wait for audio!)
-                val impactType = when {
-                    isSimulatingLocked -> "SIMULATION"
-                    overallPeak.pGpsSpeed > 60f -> "HIGH_SPEED_COLLISION"
-                    Math.abs(overallPeak.pAccelX) > 10f || Math.abs(overallPeak.pAccelY) > 10f -> "IMPACT"
-                    else -> "INCIDENT"
+                try {
+                    // Send broadcast immediately to trigger Activity via Receiver
+                    pendingIntent.send()
+                    Log.i(TAG, "🚀 Incident Broadcast sent to AlertReceiver")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Broadcast send failed", e)
                 }
+
+                // v33.8: Full Screen Intent via Notification (System-level redundant backup)
+                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val alertChannelId = "incident_alerts"
+                val channel = NotificationChannel(alertChannelId, "Critical Incident Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(true)
+                    setBypassDnd(true)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+                notificationManager.createNotificationChannel(channel)
+
+                val notificationBuilder = NotificationCompat.Builder(this@SentinelService, alertChannelId)
+                    .setSmallIcon(R.drawable.ic_launcher_foreground)
+                    .setContentTitle("CRASH DETECTED")
+                    .setContentText("Emergency alert active!")
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
+                    .setFullScreenIntent(pendingIntent, true)
+                    .setAutoCancel(true)
+                    .setOngoing(true)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+                notificationManager.notify(INCIDENT_NOTIFICATION_ID, notificationBuilder.build())
+                Log.i(TAG, "📢 Full-screen incident notification posted")
 
                 val incidentData = IncidentData(
-                    type = impactType,
-                    timestamp = System.currentTimeMillis(),
-                    utcTime = readablePointFormat.format(Date()),
-                    maxG = overallPeak.pCrashScore,
-                    speed = overallPeak.pGpsSpeed,
-                    isSimulation = isSimulatingLocked,
+                    type = if (isSimulatingLocked) "SIMULATION" else "IMPACT",
+                    timestamp = System.currentTimeMillis(), utcTime = readablePointFormat.format(Date()),
+                    maxG = overallPeak.pCrashScore, speed = overallPeak.pGpsSpeed, isSimulation = isSimulatingLocked,
                     latitude = if (_telemetry.value.gpsStatus == SensorStatus.FIX_3D) _telemetry.value.lastLat else null,
                     longitude = if (_telemetry.value.gpsStatus == SensorStatus.FIX_3D) _telemetry.value.lastLon else null,
+                    lastKnownLat = if (_telemetry.value.lastLat != 0.0) _telemetry.value.lastLat else null,
+                    lastKnownLon = if (_telemetry.value.lastLon != 0.0) _telemetry.value.lastLon else null,
                     sensorData = edrSnapshot
                 )
-                
+
                 val edrJson = prettyJson.encodeToString(incidentData)
                 sendEdrReportImmediately(edrJson, incidentData.timestamp.toString())
-                
-                // C. Remote Notification (Mobile Dashboard Alert)
                 val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
                 for (node in nodes) {
-                    Wearable.getMessageClient(this@SentinelService)
-                        .sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_START, edrJson.toByteArray())
-                        .await()
+                    Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_ALERT_START, edrJson.toByteArray()).await()
                 }
-                Log.d(TAG, "📢 Incident Alert & Immediate EDR broadcast to ${nodes.size} nodes")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to trigger Alert components", e)
-            }
+            } catch (e: Exception) { Log.e(TAG, "Alert fail", e) }
         }
-
-        // 2. Manage Audio Recording (15s Alarm + 10s Post-Dispatch = 25s total)
         startAudioRecording(durationMs = 25000L)
     }
 
@@ -1141,60 +1039,28 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         serviceScope.launch {
             try {
                 val nodes = Wearable.getNodeClient(this@SentinelService).connectedNodes.await()
-                if (nodes.isEmpty()) throw Exception("No nodes connected")
-                
-                for (node in nodes) {
-                    Wearable.getMessageClient(this@SentinelService)
-                        .sendMessage(node.id, ProtocolContract.Paths.INCIDENT_REPORT, edrJson.toByteArray())
-                        .await()
-                }
-                Log.i(TAG, "✅ EDR JSON report sent immediately for incident $incidentId")
+                for (node in nodes) Wearable.getMessageClient(this@SentinelService).sendMessage(node.id, ProtocolContract.Paths.INCIDENT_REPORT, edrJson.toByteArray()).await()
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to send EDR immediately, saving for retry: ${e.message}")
-                val record = PendingIncident(
-                    id = incidentId,
-                    edrJson = edrJson,
-                    audioPath = null, // Audio will be added later if it also fails
-                    lastAttempt = System.currentTimeMillis()
-                )
-                assetStore.savePendingIncident(record)
+                assetStore.savePendingIncident(PendingIncident(incidentId, edrJson, null, 0, System.currentTimeMillis()))
             }
         }
     }
 
     private var recordingJob: Job? = null
-
     private fun startAudioRecording(durationMs: Long = 10000L) {
         serviceScope.launch {
-            if (!audioRecordingMutex.tryLock()) {
-                Log.d(TAG, "Audio already recording, checking if we need to extend duration...")
-                // If it's already recording but we want a longer duration, we could handle it here.
-                // For now, let the existing recording finish.
-                return@launch
-            }
+            if (!audioRecordingMutex.tryLock()) return@launch
             try {
                 if (mediaRecorder != null) return@launch
-
-                val cacheDir = getExternalCacheDir() ?: getCacheDir()
-                val timestamp = audioFileNameFormat.format(Date())
-                val file = File(cacheDir, "$timestamp-REC.aac")
+                val file = File(getExternalCacheDir() ?: cacheDir, "${audioFileNameFormat.format(Date())}-REC.aac")
                 audioFile = file
-                val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this@SentinelService) else @Suppress("DEPRECATION") MediaRecorder()
-                mediaRecorder = recorder.apply {
-                    setAudioSource(MediaRecorder.AudioSource.MIC)
-                    setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                    setOutputFile(file.getAbsolutePath())
-                    prepare()
-                    start()
+                mediaRecorder = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this@SentinelService) else @Suppress("DEPRECATION") MediaRecorder()).apply {
+                    setAudioSource(MediaRecorder.AudioSource.MIC); setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC); setOutputFile(file.absolutePath)
+                    prepare(); start()
                 }
-                Log.i(TAG, "📁 Started Audio Recording: ${file.name}")
-                
                 recordingJob?.cancel()
-                recordingJob = serviceScope.launch {
-                    delay(durationMs)
-                    stopAudioRecording(delete = false)
-                }
+                recordingJob = serviceScope.launch { delay(durationMs); stopAudioRecording(delete = false) }
             } catch (e: Exception) { 
                 Log.e(TAG, "Audio fail", e)
                 if (audioRecordingMutex.isLocked) audioRecordingMutex.unlock()
@@ -1208,415 +1074,198 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
                 val recorder = mediaRecorder
                 mediaRecorder = null
                 recorder?.apply { stop(); release() }
-                
                 val file = audioFile
                 audioFile = null
-                
-                if (delete) {
-                    file?.delete()
-                    edrActiveBuffer.clear()
-                } else if (file != null && file.exists()) {
-                    // Send ONLY audio asset (EDR was already sent or queued)
-                    transferAudioEvidenceOnly(file)
-                }
-            } catch (e: Exception) { 
-                Log.e(TAG, "Audio stop fail", e)
-            } finally {
-                if (audioRecordingMutex.isLocked) audioRecordingMutex.unlock()
-            }
+                if (delete) { file?.delete(); edrActiveBuffer.clear() }
+                else if (file != null && file.exists()) transferAudioEvidenceOnly(file)
+            } catch (e: Exception) { Log.e(TAG, "Audio stop fail", e) }
+            finally { if (audioRecordingMutex.isLocked) audioRecordingMutex.unlock() }
         }
     }
 
     private suspend fun transferAudioEvidenceOnly(audioFile: File) {
-        if (!transferMutex.tryLock()) {
-            Log.w(TAG, "Transfer already in progress, skipping")
-            return
-        }
+        if (!transferMutex.tryLock()) return
         try {
-            val maxRetries = 2
-            var attempt = 0
             var success = false
-
-            Log.i(TAG, "🎵 Initiating Transfer for Audio: ${audioFile.name}...")
-
-            while (attempt <= maxRetries && !success) {
+            for (attempt in 0..2) {
                 try {
                     val nodes = Wearable.getNodeClient(this).connectedNodes.await()
-                    if (nodes.isEmpty()) {
-                        delay(5000); attempt++; continue
-                    }
-
-                    val asset = if (attempt < 2) {
-                        Asset.createFromUri(Uri.fromFile(audioFile))
-                    } else {
-                        if (audioFile.exists()) Asset.createFromBytes(audioFile.readBytes()) else null
-                    }
-
-                    asset?.let {
-                        val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.INCIDENT_AUDIO_ASSET).apply {
-                            dataMap.putAsset(ProtocolContract.Keys.AUDIO_FILE, it)
-                            dataMap.putString("file_name", audioFile.nameWithoutExtension)
-                            dataMap.putLong("timestamp", System.currentTimeMillis())
-                            setUrgent()
-                        }.asPutDataRequest()
-                        
-                        Wearable.getDataClient(this).putDataItem(putDataReq).await()
-                        success = true
-                        Log.i(TAG, "✅ Audio Evidence successfully synced: ${audioFile.name}")
-                    } ?: run { attempt++ }
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "Audio transfer attempt ${attempt + 1} failed: ${e.message}")
-                    delay(5000); attempt++
-                }
+                    if (nodes.isEmpty()) { delay(5000); continue }
+                    val asset = if (attempt < 2) Asset.createFromUri(Uri.fromFile(audioFile)) else Asset.createFromBytes(audioFile.readBytes())
+                    val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.INCIDENT_AUDIO_ASSET).apply {
+                        dataMap.putAsset(ProtocolContract.Keys.AUDIO_FILE, asset)
+                        dataMap.putString("file_name", audioFile.nameWithoutExtension)
+                        dataMap.putLong("timestamp", System.currentTimeMillis())
+                        setUrgent()
+                    }.asPutDataRequest()
+                    Wearable.getDataClient(this).putDataItem(putDataReq).await()
+                    success = true; break
+                } catch (e: Exception) { delay(5000) }
             }
-
-            if (success) {
-                if (audioFile.exists()) audioFile.delete()
-            } else {
-                Log.w(TAG, "🔥 Audio transfer failed permanently. Saving path for retry.")
-                // We could update the PendingIncident here, but for now we rely on the 5min loop
-                // finding the file in the cache if we don't delete it.
-            }
-        } finally {
-            transferMutex.unlock()
-        }
+            if (success) audioFile.delete()
+        } finally { transferMutex.unlock() }
     }
 
     fun simulateIncident(path: String) {
         if (isSimulatingLocked) return
         isSimulatingLocked = true
         serviceScope.launch {
-            Log.i(TAG, "🚀 [SIM] Scenario Started: $path")
             try {
                 when (path) {
                     ProtocolContract.Paths.SIMULATE_HARD_BRAKE -> simulateHardBrake()
                     ProtocolContract.Paths.SIMULATE_FRONTAL -> simulateFrontalImpact()
-                    ProtocolContract.Paths.SIMULATE_REAR -> simulateRearImpact()
                     ProtocolContract.Paths.SIMULATE_SIDE -> simulateSideImpact()
                     ProtocolContract.Paths.SIMULATE_ROLLOVER -> simulateRollover()
+                    ProtocolContract.Paths.SIMULATE_REAR -> simulateRearImpact()
                     ProtocolContract.Paths.SIMULATE_PLUNGE -> simulateCliffPlunge()
                     ProtocolContract.Paths.SIMULATE_RANDOM -> simulateRandom()
                     else -> simulateDefault()
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Simulation Error", e)
-            } finally {
-                isSimulatingLocked = false
-                Log.i(TAG, "🏁 [SIM] Scenario Finished: $path")
-            }
+            } finally { isSimulatingLocked = false }
         }
     }
 
     private suspend fun simulateHardBrake() {
-        // High-speed deceleration without impact: 100km/h -> 20km/h (Heavy Braking)
-        Log.d(TAG, "Scenario: Hard Braking (Anti-Collision)")
-        
-        updateSim(speedKmh = 100f, confidence = 1.0f)
-        delay(500)
-        
-        // Rapid Deceleration (approx 1.2G longitudinal)
-        updateSim(ay = -1.2f * G_EARTH, speedKmh = 60f, accuracy = 10f, confidence = 0.9f)
-        delay(1000)
-        
-        updateSim(ay = -0.8f * G_EARTH, speedKmh = 20f, accuracy = 15f, confidence = 0.8f)
-        delay(1000)
-        
-        // No trigger for just braking unless it's extreme
+        updateSim(speedKmh = 100f); delay(500)
+        updateSim(ay = -1.2f * gEarth, speedKmh = 60f); delay(1000)
+        updateSim(ay = -0.8f * gEarth, speedKmh = 20f); delay(1000)
     }
 
     private suspend fun simulateFrontalImpact() {
-        // High-Speed Frontal Impact: 80km/h -> 0 with massive G-spike
-        Log.d(TAG, "Scenario: Frontal Impact (Head-on)")
-        
-        updateSim(speedKmh = 80f, confidence = 1.0f)
-        delay(500)
-        
-        // 1. PRE_EVENT (Emergency Brake for 0.5s)
-        Log.d(TAG, "FSM: -> PRE_EVENT")
-        updateSim(ay = -6.0f * G_EARTH, speedKmh = 70f, accuracy = 10f, confidence = 0.9f)
-        delay(500)
-        
-        // 2. IMPACT (Massive longitudinal deceleration spike)
-        Log.d(TAG, "FSM: PRE_EVENT -> IMPACT")
-        updateSim(ay = -15.0f * G_EARTH, az = 2.0f * G_EARTH, speedKmh = 5f, accuracy = 50f, confidence = 0.3f)
-        delay(200)
-        
-        // 3. STILLNESS
-        updateSim(speedKmh = 0f, accuracy = 100f, confidence = 0.1f)
-        delay(2000)
+        updateSim(speedKmh = 80f); delay(500)
+        updateSim(ay = -6.0f * gEarth, speedKmh = 70f); delay(500)
+        updateSim(ay = -15.0f * gEarth, az = 2.0f * gEarth, speedKmh = 5f); delay(200)
+        updateSim(speedKmh = 0f); delay(2000)
     }
 
     private suspend fun simulateSideImpact() {
-        // Lane Change Collision: 40km/h -> 10km/h
-        Log.d(TAG, "Scenario 2: Side Impact (Lane Change)")
-        
-        updateSim(speedKmh = 40f, confidence = 1.0f)
-        delay(1000)
-        
-        // 1. PRE_EVENT: Lateral Impact (Side swipe)
-        Log.d(TAG, "FSM: -> PRE_EVENT (Side Impact)")
-        updateSim(ax = 6.5f * G_EARTH, gy = 4.0f, speedKmh = 35f, accuracy = 20f, confidence = 0.6f)
-        delay(1000)
-        
-        // 2. IMPACT: Massive rotation + secondary impact
-        Log.d(TAG, "FSM: PRE_EVENT -> IMPACT")
-        updateSim(ax = 10.5f * G_EARTH, gz = 12.0f, speedKmh = 15f, accuracy = 40f, confidence = 0.3f)
-        delay(1000)
-        
-        // 3. STILLNESS
-        updateSim(speedKmh = 0f, accuracy = 60f, confidence = 0.1f)
-        delay(3000)
+        updateSim(speedKmh = 40f); delay(1000)
+        updateSim(ax = 6.5f * gEarth, gy = 4.0f, speedKmh = 35f); delay(1000)
+        updateSim(ax = 10.5f * gEarth, gz = 12.0f, speedKmh = 15f); delay(1000)
+        updateSim(speedKmh = 0f); delay(3000)
     }
 
     private suspend fun simulateRollover() {
-        // Off-road Rollover: High Rotation
-        Log.d(TAG, "Scenario 3: Rollover (Road Departure)")
-        
-        updateSim(speedKmh = 70f, confidence = 1.0f)
-        delay(1000)
-        
-        // 1. PRE_EVENT: Leaving road / Initial trip
-        Log.d(TAG, "FSM: -> PRE_EVENT (Rollover Start)")
-        updateSim(az = 6.5f * G_EARTH, gx = 8.0f, gy = 10.0f, gz = 5.0f, speedKmh = 50f, accuracy = 50f, confidence = 0.5f)
-        delay(1000)
-        
-        // 2. IMPACT: The roll itself
-        Log.d(TAG, "FSM: PRE_EVENT -> IMPACT")
-        updateSim(ax = 9.0f * G_EARTH, ay = 8.0f * G_EARTH, az = -5.0f * G_EARTH, gx = 15.0f, speedKmh = 20f, confidence = 0.2f)
-        delay(1000)
-        
-        // 3. STILLNESS
-        updateSim(speedKmh = 0f, confidence = 0.1f)
-        delay(3000)
+        updateSim(speedKmh = 70f); delay(1000)
+        updateSim(az = 6.5f * gEarth, gx = 8.0f, gy = 10.0f, gz = 5.0f, speedKmh = 50f); delay(1000)
+        updateSim(ax = 9.0f * gEarth, ay = 8.0f * gEarth, az = -5.0f * gEarth, gx = 15.0f, speedKmh = 20f); delay(1000)
+        updateSim(speedKmh = 0f); delay(3000)
     }
 
     private suspend fun simulateRearImpact() {
-        // Sequential Collision
-        Log.d(TAG, "Scenario 4: Rear Impact (Multi-Collision)")
-        
-        updateSim(speedKmh = 30f, confidence = 1.0f)
-        delay(500)
-        
-        // 1. PRE_EVENT: Initial Impact (Pushed forward)
-        Log.d(TAG, "FSM: -> PRE_EVENT")
-        updateSim(ay = 6.0f * G_EARTH, speedKmh = 40f, confidence = 0.8f)
-        delay(200)
-        
-        // 2. IMPACT: Secondary Impact (Hit car in front)
-        Log.d(TAG, "FSM: PRE_EVENT -> IMPACT")
-        updateSim(ay = -12.0f * G_EARTH, speedKmh = 5f, accuracy = 80f, confidence = 0.3f)
-        delay(500)
-        
-        // 3. STILLNESS
-        updateSim(speedKmh = 0f, confidence = 0.2f)
-        delay(2000)
+        updateSim(speedKmh = 30f); delay(500)
+        updateSim(ay = 6.0f * gEarth, speedKmh = 40f); delay(200)
+        updateSim(ay = -12.0f * gEarth, speedKmh = 5f); delay(500)
+        updateSim(speedKmh = 0f); delay(2000)
     }
 
     private suspend fun simulateCliffPlunge() {
-        // Cliff Plunge: Freefall -> Terminal Impact
-        Log.d(TAG, "Scenario 6: Cliff Plunge (Vertical Drop)")
-        
-        updateSim(speedKmh = 50f, confidence = 1.0f)
-        delay(1000)
-        
-        // 1. FALLING: Freefall (1s): 0g
-        Log.d(TAG, "FSM: -> FALLING (Freefall 0g)")
-        updateSim(ax = 0f, ay = 0f, az = 0f, speedKmh = 45f, confidence = 0.8f)
-        delay(1500)
-        
-        // 2. FALLING: Air Resistance / Descent (2s): ~0.2g
-        updateSim(az = 0.2f * G_EARTH, speedKmh = 30f, accuracy = 100f, confidence = 0.4f)
-        delay(1500)
-        
-        // 3. IMPACT (Terminal): +7g spike
-        Log.d(TAG, "FSM: FALLING -> IMPACT (Terminal)")
-        updateSim(az = 7.0f * G_EARTH, gx = 5.0f, speedKmh = 0f, accuracy = 200f, confidence = 0.1f)
-        delay(1000)
-        
-        // 4. STILLNESS
-        updateSim(speedKmh = 0f, confidence = 0.1f)
-        delay(3000)
+        updateSim(speedKmh = 50f); delay(1000)
+        updateSim(ax = 0f, ay = 0f, az = 0f, speedKmh = 45f); delay(1500)
+        updateSim(az = 0.2f * gEarth, speedKmh = 30f); delay(1500)
+        updateSim(az = 7.0f * gEarth, gx = 5.0f, speedKmh = 0f); delay(1000)
+        updateSim(speedKmh = 0f); delay(3000)
     }
 
     private suspend fun simulateRandom() {
-        // Irregular pattern
-        Log.d(TAG, "Scenario 5: Random / Complex Pattern")
         val rand = java.util.Random()
-        
-        updateSim(speedKmh = 80f)
-        delay(500)
-        
-        repeat(5) {
-            updateSim(
-                ax = (rand.nextFloat() - 0.5f) * 15f,
-                gy = rand.nextFloat() * 10f,
-                speedKmh = 80f - it * 15f
-            )
-            delay(200)
-        }
-        
-        updateSim(speedKmh = 0f)
-        delay(2000)
+        updateSim(speedKmh = 80f); delay(500)
+        repeat(5) { updateSim(ax = (rand.nextFloat() - 0.5f) * 15f, gy = rand.nextFloat() * 10f, speedKmh = 80f - it * 15f); delay(200) }
+        updateSim(speedKmh = 0f); delay(2000)
     }
 
     private suspend fun simulateDefault() {
-        updateSim(speedKmh = 65f)
-        delay(1000)
-        updateSim(az = 12.5f * G_EARTH, speedKmh = 15f)
-        delay(500)
-        updateSim(speedKmh = 0f)
-        delay(3000) 
+        updateSim(speedKmh = 65f); delay(1000)
+        updateSim(az = 12.5f * gEarth, speedKmh = 15f); delay(500)
+        updateSim(speedKmh = 0f); delay(3000) 
     }
 
-    private fun updateSim(
-        ax: Float = 0f, ay: Float = 0f, az: Float = G_EARTH,
-        gx: Float = 0f, gy: Float = 0f, gz: Float = 0f,
-        speedKmh: Float = 0f, accuracy: Float = 5f, confidence: Float = 1.0f
-    ) {
+    private fun updateSim(ax: Float = 0f, ay: Float = 0f, az: Float = gEarth, gx: Float = 0f, gy: Float = 0f, gz: Float = 0f, speedKmh: Float = 0f, accuracy: Float = 5f, confidence: Float = 1.0f, lat: Double = 37.5665, lon: Double = 126.9780) {
         synchronized(currentReading) {
             currentReading[0] = ax; currentReading[1] = ay; currentReading[2] = az
             currentReading[3] = gx; currentReading[4] = gy; currentReading[5] = gz
-            currentReading[11] = speedKmh / MPS_TO_KMH
-            currentReading[12] = accuracy
+            currentReading[11] = speedKmh / mpsToKmh; currentReading[12] = accuracy
+            lastLat = lat; lastLon = lon
         }
         gpsConfidence = confidence
+        _telemetry.value = _telemetry.value.copy(lastLat = lat, lastLon = lon)
     }
 
     fun injectCustomSensorData(csv: String) {
-        Log.i(TAG, "💉 Manual Injection Received: $csv")
         try {
             val parts = csv.split(",")
             if (parts.size >= 8) {
-                val ax = parts[0].toFloat()
-                val ay = parts[1].toFloat()
-                val az = parts[2].toFloat()
-                val gx = parts[3].toFloat()
-                val gy = parts[4].toFloat()
-                val gz = parts[5].toFloat()
-                val sp = parts[6].toFloat()
-                val pr = parts[7].toFloat()
-
+                val ax = parts[0].toFloat(); val ay = parts[1].toFloat(); val az = parts[2].toFloat()
+                val gx = parts[3].toFloat(); val gy = parts[4].toFloat(); val gz = parts[5].toFloat()
+                val sp = parts[6].toFloat(); val pr = parts[7].toFloat()
                 serviceScope.launch {
-                    // Update currentReading
                     synchronized(currentReading) {
                         currentReading[0] = ax; currentReading[1] = ay; currentReading[2] = az
                         val toRad = (Math.PI / 180.0).toFloat()
                         currentReading[3] = gx * toRad; currentReading[4] = gy * toRad; currentReading[5] = gz * toRad
-                        currentReading[11] = sp / MPS_TO_KMH // FIX: Treat injection as km/h
-                        currentReading[6] = pr
+                        currentReading[11] = sp / mpsToKmh; currentReading[6] = pr
                     }
                     baselinePressure = pr
-
-                    // FORCE EDR Snapshot for this injection
-                    val impact = Math.sqrt((ax*ax + ay*ay + az*az).toDouble()).toFloat() / G_EARTH
-                    if (impact > 10.0f) {
-                        Log.w(TAG, "Manual Injection exceeds 10G! Forcing alert sequence.")
-                        triggerAlertUI()
-                    }
+                    if (Math.sqrt((ax*ax + ay*ay + az*az).toDouble()).toFloat() / gEarth > 10.0f) triggerAlertUI()
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse manual injection", e)
-        }
+        } catch (e: Exception) { Log.e(TAG, "Parse fail", e) }
     }
 
     private fun calculateRoll(rotationVector: FloatArray): Float {
         if (rotationVector.all { it == 0f }) return 0f
         return try {
-            val rotationMatrix = FloatArray(9)
-            SensorManager.getRotationMatrixFromVector(rotationMatrix, rotationVector)
-            val orientation = FloatArray(3)
-            SensorManager.getOrientation(rotationMatrix, orientation)
-            Math.toDegrees(orientation[2].toDouble()).toFloat()
+            val rM = FloatArray(9); SensorManager.getRotationMatrixFromVector(rM, rotationVector)
+            val orient = FloatArray(3); SensorManager.getOrientation(rM, orient)
+            Math.toDegrees(orient[2].toDouble()).toFloat()
         } catch (e: Exception) { 0f }
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        if (event == null || isSimulatingLocked) return
+        if (event == null) return
         synchronized(currentReading) {
             when (event.sensor.type) {
-                Sensor.TYPE_ACCELEROMETER -> {
-                    currentReading[0] = event.values[0]; currentReading[1] = event.values[1]; currentReading[2] = event.values[2]
-                }
-                Sensor.TYPE_GYROSCOPE -> {
-                    currentReading[3] = event.values[0]; currentReading[4] = event.values[1]; currentReading[5] = event.values[2]
-                }
-                Sensor.TYPE_PRESSURE -> {
-                    currentReading[6] = event.values[0]
-                    if (baselinePressure == 0f) baselinePressure = event.values[0]
-                }
-                Sensor.TYPE_ROTATION_VECTOR -> {
-                    for (i in 0 until minOf(event.values.size, 4)) currentReading[7 + i] = event.values[i]
-                }
+                Sensor.TYPE_ACCELEROMETER -> { currentReading[0] = event.values[0]; currentReading[1] = event.values[1]; currentReading[2] = event.values[2]; lastAccelMag = Math.sqrt((event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2]).toDouble()).toFloat() / gEarth }
+                Sensor.TYPE_GYROSCOPE -> { currentReading[3] = event.values[0]; currentReading[4] = event.values[1]; currentReading[5] = event.values[2] }
+                Sensor.TYPE_PRESSURE -> { currentReading[6] = event.values[0]; if (baselinePressure == 0f) baselinePressure = event.values[0] }
+                Sensor.TYPE_ROTATION_VECTOR -> { for (i in 0 until minOf(event.values.size, 4)) currentReading[7 + i] = event.values[i] }
             }
         }
     }
     
     override fun onLocationChanged(location: Location) {
         if (isSimulatingLocked) return
-        
         val now = SystemClock.elapsedRealtime()
-        if (lastLocationTime > 0) {
-            lastLocationInterval = now - lastLocationTime
-        }
+        if (lastLocationTime > 0) lastLocationInterval = now - lastLocationTime
         lastLocationTime = now
-
-        // POLICY: Raw Real-time Direct Reception (v28.1)
-        // No filtering, no provider checks (accept all hardware GPS/GNSS)
+        if (location.provider != LocationManager.GPS_PROVIDER) lastNetworkTime = now
         synchronized(currentReading) {
-            val speed = if (location.hasSpeed()) location.speed else 0f
-            currentReading[11] = speed
-            currentReading[12] = location.accuracy
-            currentReading[13] = location.bearing
-            currentReading[14] = location.altitude.toFloat()
-            
-            if (lastLat != 0.0) {
-                val results = FloatArray(1)
-                Location.distanceBetween(lastLat, lastLon, location.latitude, location.longitude, results)
-                lastDisplacement = results[0]
-            }
-            lastLat = location.latitude
-            lastLon = location.longitude
+            if (location.provider == LocationManager.GPS_PROVIDER) { currentReading[11] = if (location.hasSpeed()) location.speed else 0f; lastWatchGpsTime = now }
+            currentReading[12] = location.accuracy; currentReading[13] = location.bearing; currentReading[14] = location.altitude.toFloat()
+            if (lastLat != 0.0) { val res = FloatArray(1); Location.distanceBetween(lastLat, lastLon, location.latitude, location.longitude, res); lastDisplacement = res[0] }
+            lastLat = location.latitude; lastLon = location.longitude
         }
-        lastWatchGpsTime = SystemClock.elapsedRealtime()
-        
-        // Update telemetry immediately for GPS status
-        _telemetry.value = _telemetry.value.copy(
-            watchGpsAccuracy = location.accuracy,
-            isWatchGpsActive = true,
-            lastLat = location.latitude,
-            lastLon = location.longitude,
-            lastLocationReceivedAt = lastWatchGpsTime
-        )
+        _telemetry.value = _telemetry.value.copy(watchGpsAccuracy = location.accuracy, lastLat = location.latitude, lastLon = location.longitude, lastLocationReceivedAt = now)
     }
 
     private fun startWatchGps() {
         try {
-            // Priority: Real-time (0ms interval, 0m distance) - SENSOR_DELAY_GAME equivalent
             locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
+            try { locationManager?.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 2000L, 0f, this) } catch (e: Exception) {}
             locationManager?.registerGnssStatusCallback(gnssStatusCallback, sensorHandler)
-            Log.i(TAG, "Watch GPS Raw Real-time Started with GNSS Monitoring")
-        } catch (e: SecurityException) { Log.e(TAG, "GPS Denied", e) }
+        } catch (e: SecurityException) {}
     }
 
     private fun stopWatchGps() {
-        locationManager?.removeUpdates(this)
-        locationManager?.unregisterGnssStatusCallback(gnssStatusCallback)
-        synchronized(currentReading) {
-            currentReading[11] = 0f
-        }
-        lastWatchGpsTime = 0L
-        gnssSignalSeen = false
+        locationManager?.removeUpdates(this); locationManager?.unregisterGnssStatusCallback(gnssStatusCallback)
+        synchronized(currentReading) { currentReading[11] = 0f }
+        lastWatchGpsTime = 0L; lastNetworkTime = 0L; lastLocationTime = 0L; gnssSignalSeen = false; currentGpsMode = GpsMode.WATCH_ONLY
     }
     
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     override fun onProviderEnabled(provider: String) {}
     override fun onProviderDisabled(provider: String) {}
-    override fun onBind(intent: Intent): IBinder {
-        super.onBind(intent)
-        return SentinelBinder()
-    }
+    override fun onBind(intent: Intent): IBinder { super.onBind(intent); return SentinelBinder() }
     inner class SentinelBinder : Binder() { fun getService(): SentinelService = this@SentinelService }
 
     companion object {
@@ -1625,11 +1274,13 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         var lastKnownVState: VehicleInferenceState = VehicleInferenceState.IDLE
             private set
         private const val NOTIFICATION_ID = 1001
+        private const val INCIDENT_NOTIFICATION_ID = 1002
         const val ACTION_START_MONITORING = "com.jinn.watch2out.wear.START_MONITORING"
         const val ACTION_STOP_MONITORING = "com.jinn.watch2out.wear.STOP_MONITORING"
         const val ACTION_RESET_PEAKS = "com.jinn.watch2out.wear.RESET_PEAKS"
         const val ACTION_DASHBOARD_START = "com.jinn.watch2out.wear.DASHBOARD_START"
         const val ACTION_DASHBOARD_STOP = "com.jinn.watch2out.wear.DASHBOARD_STOP"
+        const val ACTION_DASHBOARD_CONFIG = "com.jinn.watch2out.wear.DASHBOARD_CONFIG"
         const val ACTION_DISMISS_INCIDENT = "com.jinn.watch2out.wear.DISMISS_INCIDENT"
         const val ACTION_FINAL_DISPATCH = "com.jinn.watch2out.wear.FINAL_DISPATCH"
         const val ACTION_UPDATE_HEARTBEAT = "com.jinn.watch2out.wear.UPDATE_HEARTBEAT"
@@ -1638,5 +1289,6 @@ class SentinelService : LifecycleService(), SensorEventListener, LocationListene
         const val ACTION_UPDATE_SYNC_POLICY = "com.jinn.watch2out.wear.UPDATE_SYNC_POLICY"
         const val ACTION_FORCE_SYNC = "com.jinn.watch2out.wear.FORCE_SYNC"
         const val ACTION_SENSOR_STATUS_SYNC = "com.jinn.watch2out.wear.SENSOR_STATUS_SYNC"
+        const val ACTION_STOP_VIBRATION = "com.jinn.watch2out.wear.STOP_VIBRATION"
     }
 }

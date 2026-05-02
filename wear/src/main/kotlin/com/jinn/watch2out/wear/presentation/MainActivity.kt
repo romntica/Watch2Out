@@ -287,9 +287,12 @@ fun MainScreen(
 
 @Composable
 fun FusionBadge(mode: GpsMode) {
-    val isFusion = mode == GpsMode.PHONE_PRIMARY
-    val color = if (isFusion) Color(0xFF42A5F5) else Color(0xFFFFA726)
-    val text = if (isFusion) "FUSION (PHONE)" else "STANDALONE"
+    val (color, text) = when (mode) {
+        GpsMode.PHONE_PRIMARY -> Color(0xFF42A5F5) to "FUSION (PHONE)"
+        GpsMode.WATCH_ONLY -> Color(0xFFFFA726) to "GPS ONLY"
+        GpsMode.WATCH_HYBRID -> Color(0xFF66BB6A) to "HYBRID (GPS+NET)"
+        GpsMode.WATCH_NETWORK_ONLY -> Color(0xFFEF5350) to "NET ONLY (FALLBACK)"
+    }
     
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Box(modifier = Modifier.size(6.dp).background(color, CircleShape))

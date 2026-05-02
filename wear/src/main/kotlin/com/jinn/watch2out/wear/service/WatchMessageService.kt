@@ -84,6 +84,16 @@ class WatchMessageService : WearableListenerService() {
                         }
                         startService(intent)
                     }
+                    path.startsWith(ProtocolContract.Paths.DASHBOARD_CONFIG) -> {
+                        val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
+                        val windowMs = dataMap.getLong(ProtocolContract.Keys.WINDOW_MS)
+                        
+                        val intent = Intent(applicationContext, SentinelService::class.java).apply {
+                            action = SentinelService.ACTION_DASHBOARD_CONFIG
+                            putExtra(ProtocolContract.Keys.WINDOW_MS, windowMs)
+                        }
+                        startService(intent)
+                    }
                 }
             }
         }
@@ -136,8 +146,7 @@ class WatchMessageService : WearableListenerService() {
                 ProtocolContract.Paths.RESET_PEAKS,
                 ProtocolContract.Paths.DASHBOARD_START,
                 ProtocolContract.Paths.DASHBOARD_STOP,
-                ProtocolContract.Paths.SYNC_POLICY_UPDATE,
-                ProtocolContract.Paths.FULL_SYNC_REQUEST -> {
+                ProtocolContract.Paths.SYNC_POLICY_UPDATE -> {
                     val intent = Intent(applicationContext, SentinelService::class.java).apply {
                         action = when (path) {
                             ProtocolContract.Paths.START_MONITORING -> SentinelService.ACTION_START_MONITORING
@@ -146,11 +155,10 @@ class WatchMessageService : WearableListenerService() {
                             ProtocolContract.Paths.DASHBOARD_START -> SentinelService.ACTION_DASHBOARD_START
                             ProtocolContract.Paths.DASHBOARD_STOP -> SentinelService.ACTION_DASHBOARD_STOP
                             ProtocolContract.Paths.SYNC_POLICY_UPDATE -> SentinelService.ACTION_UPDATE_SYNC_POLICY
-                            ProtocolContract.Paths.FULL_SYNC_REQUEST -> SentinelService.ACTION_FORCE_SYNC
                             else -> null
                         }
                         if (path == ProtocolContract.Paths.SYNC_POLICY_UPDATE) {
-                            val highSpeed = messageEvent.data?.getOrNull(0)?.toInt() == 1
+                            val highSpeed = messageEvent.data.getOrNull(0)?.toInt() == 1
                             putExtra("high_speed", highSpeed)
                         }
                     }
@@ -160,6 +168,21 @@ class WatchMessageService : WearableListenerService() {
                         } else {
                             startService(intent)
                         }
+                    }
+                }
+
+                ProtocolContract.Paths.FULL_SYNC_REQUEST -> {
+                    // Phase 8: Handshake Fix (v33.2)
+                    // If the main service is running, let it handle the request.
+                    // If NOT, send an immediate fallback response so the Mobile UI doesn't hang.
+                    if (SentinelService.isRunning) {
+                        val intent = Intent(applicationContext, SentinelService::class.java).apply {
+                            action = SentinelService.ACTION_FORCE_SYNC
+                        }
+                        startService(intent)
+                    } else {
+                        Log.d(TAG, "⚡ Service not running, sending fallback inactive status")
+                        sendImmediateSensorStatus()
                     }
                 }
 
@@ -214,7 +237,8 @@ class WatchMessageService : WearableListenerService() {
                     if (sensorManager.getDefaultSensor(type) != null) SensorStatus.AVAILABLE.name else SensorStatus.MISSING.name
 
                 val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.STATUS_SYNC).apply {
-                    dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, SentinelService.lastKnownState != IncidentState.IDLE)
+                    val isActive = SentinelService.isRunning && SentinelService.lastKnownState != IncidentState.IDLE
+                    dataMap.putBoolean(ProtocolContract.Keys.IS_ACTIVE, isActive)
                     dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
                     
                     dataMap.putString(ProtocolContract.Keys.ACCEL_STATUS, check(Sensor.TYPE_ACCELEROMETER))

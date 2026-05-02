@@ -27,7 +27,7 @@ class PhoneGpsManager(private val context: Context) {
     companion object {
         // Policy: Watch GPS Only (v27.7.3)
         // Set to true to completely deactivate Phone GPS collection and usage.
-        const val IS_RESERVED_MODE = true
+        const val IS_RESERVED_MODE = false
 
         // UI Hysteresis
         private const val UI_ACQUIRE_THRESHOLD = 25f

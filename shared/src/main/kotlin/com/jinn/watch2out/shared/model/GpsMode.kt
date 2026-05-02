@@ -12,5 +12,11 @@ enum class GpsMode {
     PHONE_PRIMARY,
     
     /** Watch GPS operates independently. */
-    WATCH_ONLY
+    WATCH_ONLY,
+
+    /** Watch using both GPS and Network (Supplemental). */
+    WATCH_HYBRID,
+
+    /** Watch using only Network (Fallback). */
+    WATCH_NETWORK_ONLY
 }

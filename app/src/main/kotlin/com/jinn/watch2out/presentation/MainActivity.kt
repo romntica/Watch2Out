@@ -90,6 +90,10 @@ class MainActivity : ComponentActivity(),
     private lateinit var phoneGpsManager: PhoneGpsManager
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private var lastLocationAvailability: com.google.android.gms.location.LocationAvailability? = null
+    private var currentGpsIntervalMs = 600000L // Default 10 min (Sync #8)
+    private var locationCallback: com.google.android.gms.location.LocationCallback? = null
+
+    private var currentScreenState: Screen = Screen.Main
 
     private val explicitJson = Json {
         allowSpecialFloatingPointValues = true
@@ -129,6 +133,7 @@ class MainActivity : ComponentActivity(),
         
         checkConnectionStatus()
         fetchLatestTelemetry()
+        lifecycleScope.launch { requestFullTelemetrySync() } // Phase 8: Initial Handshake (v32.9)
         handleIntent(intent)
 
         setContent {
@@ -189,6 +194,7 @@ class MainActivity : ComponentActivity(),
                         }
                         is Screen.Dashboard -> {
                             BackHandler { currentScreen = Screen.Main }
+                            currentScreenState = currentScreen
                             DisposableEffect(Unit) {
                                 sendSyncPolicy(highSpeed = true)
                                 sendRemoteCommand(ProtocolContract.Paths.DASHBOARD_START)
@@ -201,6 +207,7 @@ class MainActivity : ComponentActivity(),
                             DashboardScreen(
                                 telemetry = telemetryState.value,
                                 onResetPeak = { sendRemoteCommand(ProtocolContract.Paths.RESET_PEAKS) },
+                                onWindowChange = { windowMs -> sendDashboardConfig(windowMs) },
                                 onClose = { currentScreen = Screen.Main }
                             )
                         }
@@ -240,23 +247,33 @@ class MainActivity : ComponentActivity(),
         }
     }
 
-    private fun startLocationUpdates() {
+    private fun startLocationUpdates(intervalMs: Long? = null) {
+        val interval = intervalMs ?: currentGpsIntervalMs
+        if (interval == currentGpsIntervalMs && locationCallback != null) return
+        
+        currentGpsIntervalMs = interval
+        Log.d("SentinelApp", "Location updates: ${interval/1000}s interval requested")
+
         if (PhoneGpsManager.IS_RESERVED_MODE) {
-            Log.d("SentinelApp", "Location updates disabled: PhoneGpsManager is in RESERVED_MODE (Watch Only Policy)")
+            Log.d("SentinelApp", "Location updates disabled: PhoneGpsManager is in RESERVED_MODE")
             return
         }
+
+        // Cleanup existing callback if any
+        locationCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
+
         val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.SEND_SMS)
         }
         
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             requestPermissionLauncher.launch(permissions.toTypedArray())
             return
         }
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L).build()
-        fusedLocationClient.requestLocationUpdates(request, object : LocationCallback() {
+
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, interval).build()
+        val callback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 val location = result.lastLocation ?: return
                 syncHeartbeatToWatch(location)
@@ -264,7 +281,9 @@ class MainActivity : ComponentActivity(),
             override fun onLocationAvailability(availability: LocationAvailability) {
                 lastLocationAvailability = availability
             }
-        }, Looper.getMainLooper())
+        }
+        locationCallback = callback
+        fusedLocationClient.requestLocationUpdates(request, callback, Looper.getMainLooper())
     }
 
     private fun syncHeartbeatToWatch(location: Location) {
@@ -312,7 +331,9 @@ class MainActivity : ComponentActivity(),
                     putExtra("timestamp", incident.timestamp)
                     incident.latitude?.let { putExtra("lat", it) }
                     incident.longitude?.let { putExtra("lon", it) }
-                    putExtra("has_location", incident.latitude != null)
+                    incident.lastKnownLat?.let { putExtra("last_lat", it) }
+                    incident.lastKnownLon?.let { putExtra("last_lon", it) }
+                    putExtra("has_location", incident.latitude != null || incident.lastKnownLat != null)
                     putExtra("maxG", incident.maxG)
                     putExtra("speed", incident.speed)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -321,6 +342,25 @@ class MainActivity : ComponentActivity(),
             } catch (e: Exception) { }
         } else if (messageEvent.path == ProtocolContract.Paths.INCIDENT_ALERT_DISMISS) {
             sendBroadcast(Intent("com.jinn.watch2out.DISMISS_ALERT"))
+        } else if (messageEvent.path == ProtocolContract.Paths.DASHBOARD_DATA) {
+            try {
+                val json = String(messageEvent.data)
+                val newTelemetry = explicitJson.decodeFromString<TelemetryState>(json)
+                val now = System.currentTimeMillis()
+
+                telemetryState.value = newTelemetry.copy(
+                    lastUpdateTime = now
+                )
+
+                // High-frequency UI indicators update
+                sensorStates["A"] = newTelemetry.accelStatus
+                sensorStates["G"] = newTelemetry.gyroStatus
+                sensorStates["P"] = newTelemetry.pressureStatus
+                sensorStates["R"] = newTelemetry.rotationStatus
+                sensorStates["L"] = newTelemetry.gpsStatus
+            } catch (e: Exception) {
+                Log.e("SentinelSync", "Failed to decode dashboard stream", e)
+            }
         }
     }
 
@@ -397,10 +437,8 @@ class MainActivity : ComponentActivity(),
                             try { 
                                 val newTelemetry = explicitJson.decodeFromString<TelemetryState>(json)
                                 val now = System.currentTimeMillis()
-                                val lag = if (newTelemetry.wearTimestamp > 0) now - newTelemetry.wearTimestamp else 0L
                                 
                                 telemetryState.value = newTelemetry.copy(
-                                    syncLagMs = lag,
                                     lastUpdateTime = now
                                 )
                                 
@@ -412,8 +450,20 @@ class MainActivity : ComponentActivity(),
                                 sensorStates["R"] = newTelemetry.rotationStatus
                                 
                                 // Specific GPS logic: If monitoring is active, use detailed status from telemetry
+                                val watchGpsStatus = newTelemetry.gpsStatus
                                 sensorStates["L"] = if (!isActive) SensorStatus.DISABLED 
-                                                    else newTelemetry.gpsStatus
+                                                    else watchGpsStatus
+
+                                // Adaptive GPS Sync Strategy (#6, #7, #8)
+                                val isDashboardActive = currentScreenState is Screen.Dashboard
+                                val isWatchGpsOk = watchGpsStatus == SensorStatus.FIX_3D || watchGpsStatus == SensorStatus.LOW_ACC
+                                
+                                val nextInterval = when {
+                                    isDashboardActive -> 1000L // 1s if Dashboard is open
+                                    isWatchGpsOk -> 600000L    // 10m if Watch GPS is OK (#8)
+                                    else -> 60000L            // 1m if Watch GPS is lost (#7)
+                                }
+                                startLocationUpdates(nextInterval)
                             } catch(e: Exception) { 
                                 Log.e("SentinelSync", "Failed to decode telemetry", e)
                             }
@@ -459,11 +509,9 @@ class MainActivity : ComponentActivity(),
                         try {
                             val telemetry = explicitJson.decodeFromString<TelemetryState>(json)
                             val now = System.currentTimeMillis()
-                            val lag = if (telemetry.wearTimestamp > 0) now - telemetry.wearTimestamp else 0L
                             
                             launch(Dispatchers.Main) {
                                 telemetryState.value = telemetry.copy(
-                                    syncLagMs = lag,
                                     lastUpdateTime = now
                                 )
                                 sensorStates["A"] = telemetry.accelStatus
@@ -553,6 +601,21 @@ class MainActivity : ComponentActivity(),
             } catch (e: Exception) { }
         }
     }
+
+    private fun sendDashboardConfig(windowMs: Long) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val nodes = Wearable.getNodeClient(this@MainActivity).connectedNodes.await()
+                val putDataReq = PutDataMapRequest.create(ProtocolContract.Paths.DASHBOARD_CONFIG).apply {
+                    dataMap.putLong(ProtocolContract.Keys.WINDOW_MS, windowMs)
+                    dataMap.putLong(ProtocolContract.Keys.TIMESTAMP, System.currentTimeMillis())
+                }.asPutDataRequest().setUrgent()
+                
+                Wearable.getDataClient(this@MainActivity).putDataItem(putDataReq).await()
+                Log.d("SentinelApp", "Dashboard window updated: ${windowMs/60000} min")
+            } catch (e: Exception) { }
+        }
+    }
 }
 
 @Composable
@@ -632,9 +695,12 @@ fun MainAppContent(
 
 @Composable
 fun FusionStatusCard(mode: GpsMode, speed: Float) {
-    val isReserved = PhoneGpsManager.IS_RESERVED_MODE
-    val color = if (isReserved) Color.Gray else if (mode == GpsMode.PHONE_PRIMARY) Color(0xFF42A5F5) else Color(0xFFFFA726)
-    val text = if (isReserved) "GPS POLICY: WATCH-ONLY (ACTIVE)" else if (mode == GpsMode.PHONE_PRIMARY) "GPS FUSION: ACTIVE (PHONE)" else "GPS FUSION: STANDALONE (WATCH)"
+    val (color, text) = when (mode) {
+        GpsMode.PHONE_PRIMARY -> Color(0xFF42A5F5) to "GPS FUSION: ACTIVE (PHONE)"
+        GpsMode.WATCH_ONLY -> Color(0xFFFFA726) to "GPS FUSION: STANDALONE (WATCH)"
+        GpsMode.WATCH_HYBRID -> Color(0xFF66BB6A) to "GPS FUSION: HYBRID (GPS+NET)"
+        GpsMode.WATCH_NETWORK_ONLY -> Color(0xFFEF5350) to "GPS FUSION: NETWORK (FALLBACK)"
+    }
     
     Surface(
         color = color.copy(alpha = 0.1f),

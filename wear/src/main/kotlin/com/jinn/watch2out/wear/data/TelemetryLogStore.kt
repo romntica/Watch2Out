@@ -33,18 +33,19 @@ class TelemetryLogStore(private val context: Context) {
         }
     }
 
-    suspend fun getPendingBatches(): List<Pair<File, TelemetryLogBatch>> = mutex.withLock {
+    suspend fun getOldestBatch(): Pair<File, TelemetryLogBatch>? = mutex.withLock {
         withContext(Dispatchers.IO) {
-            val files = logDir.listFiles { _, name -> name.startsWith("log_") && name.endsWith(".json") } ?: emptyArray()
-            files.mapNotNull { file ->
-                try {
-                    val content = file.readText()
-                    file to json.decodeFromString<TelemetryLogBatch>(content)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to read log file ${file.name}: ${e.message}")
-                    file.delete()
-                    null
-                }
+            val files = logDir.listFiles { _, name -> name.startsWith("log_") && name.endsWith(".json") }
+                ?.sortedBy { it.name } ?: emptyList()
+            
+            val file = files.firstOrNull() ?: return@withContext null
+            try {
+                val content = file.readText()
+                file to json.decodeFromString<TelemetryLogBatch>(content)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read log file ${file.name}: ${e.message}")
+                file.delete()
+                null
             }
         }
     }

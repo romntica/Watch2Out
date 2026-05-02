@@ -42,12 +42,18 @@ import java.util.*
 fun DashboardScreen(
     telemetry: TelemetryState,
     onResetPeak: () -> Unit,
+    onWindowChange: (Long) -> Unit,
     onClose: () -> Unit
 ) {
     val timeSdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     val dateSdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
     var selectedWindow by remember { mutableStateOf("10m") }
     var showDebug by remember { mutableStateOf(false) }
+    
+    // Initial sync of window
+    LaunchedEffect(Unit) {
+        onWindowChange(getWindowMs(selectedWindow))
+    }
     
     Surface(color = Color(0xFF050505), modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -108,7 +114,7 @@ fun DashboardScreen(
                     latG = telemetry.maxLateralG,
                     rmsG = telemetry.maxImpact,
                     crashScore = telemetry.pCrashScore,
-                    gyroRatio = telemetry.pGyroRatio,
+                    gyroRatio = telemetry.gyroRatio, // v33.8: Use current as placeholder or remove
                     speedDelta = telemetry.maxSpeedDrop,
                     pressDelta = telemetry.pPressureDelta,
                     rollSum = telemetry.pRollSum,
@@ -141,7 +147,10 @@ fun DashboardScreen(
                         tabs.forEach { window ->
                             Tab(
                                 selected = selectedWindow == window,
-                                onClick = { selectedWindow = window },
+                                onClick = { 
+                                    selectedWindow = window
+                                    onWindowChange(getWindowMs(window))
+                                },
                                 text = { Text(window, fontSize = 12.sp, color = if (selectedWindow == window) Color.White else Color.Gray) }
                             )
                         }
@@ -152,7 +161,7 @@ fun DashboardScreen(
                     latG = telemetry.wMaxLateralG,
                     rmsG = telemetry.windowImpact,
                     crashScore = telemetry.wCrashScore,
-                    gyroRatio = telemetry.wGyroRatio,
+                    gyroRatio = telemetry.gyroRatio, // v33.8: Use current as placeholder
                     speedDelta = telemetry.wMaxSpeedDrop,
                     pressDelta = telemetry.wPressureDelta,
                     rollSum = telemetry.wRollSum,
@@ -270,12 +279,6 @@ fun LiveFeedCard(t: TelemetryState) {
             HorizontalDivider(color = Color.DarkGray)
             Text("SYNC DIAGNOSTICS (v28.6)", color = Color.Magenta, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                val lagColor = when {
-                    t.syncLagMs < 200 -> Color.Green
-                    t.syncLagMs < 1000 -> Color.Yellow
-                    else -> Color.Red
-                }
-                Text("LAG: ${t.syncLagMs}ms", color = lagColor, fontSize = 10.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                 Text("REASON: ${t.syncReason}", color = Color.Gray, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             }
             if (t.wearTimestamp > 0) {
@@ -309,11 +312,10 @@ fun LiveFeedCard(t: TelemetryState) {
                 )
             }
             
-            // Battery & CPU Diagnostic Strip
+            // Battery Diagnostic Strip
             if (t.batteryLevel != -1) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("BATT: ${t.batteryLevel}% (${String.format("%.1f", t.batteryChangePerHour)}%/h)", color = Color.Gray, fontSize = 9.sp)
-                    Text("RAW SPD: ${String.format("%.1f", t.lastSpeedMps)}m/s", color = Color.Gray, fontSize = 9.sp)
                 }
             }
         }
@@ -405,34 +407,27 @@ fun DebugTuningCard(t: TelemetryState) {
             
             Row(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
-                    DebugMetric("Normalized", "")
-                    DebugMetric(" Acc: ", String.format("%.2f", t.nAccel))
-                    DebugMetric(" Spd: ", String.format("%.2f", t.nSpeed))
-                    DebugMetric(" Gyr: ", String.format("%.2f", t.nGyro))
-                    DebugMetric(" Prs: ", String.format("%.2f", t.nPress))
-                    DebugMetric(" Stl: ", String.format("%.2f", t.nStill))
-                    DebugMetric(" Rol: ", String.format("%.2f", t.nRoll))
+                    DebugMetric("Diagnostics", "")
+                    DebugMetric(" Inference: ", t.vehicleInferenceState.name)
+                    DebugMetric(" Anomaly: ", t.anomalyType)
                 }
                 Column(Modifier.weight(1f)) {
-                    DebugMetric("Eff. Weights", "")
-                    DebugMetric(" wAcc: ", String.format("%.2f", t.wAccel))
-                    DebugMetric(" wSpd: ", String.format("%.2f", t.wSpeed))
-                    DebugMetric(" wGyr: ", String.format("%.2f", t.wGyro))
-                    DebugMetric(" wPrs: ", String.format("%.2f", t.wPress))
-                    DebugMetric(" wStl: ", String.format("%.2f", t.wStill))
-                    DebugMetric(" wRol: ", String.format("%.2f", t.wRoll))
+                    DebugMetric("GPS Source", "")
+                    DebugMetric(" Mode: ", t.activeGpsSource.name)
+                    DebugMetric(" Reason: ", t.speedReason)
                 }
             }
             HorizontalDivider(color = Color.DarkGray)
-            Text("Rule Bonues", color = Color.Gray, fontSize = 10.sp)
+            Text("Rule Indicators", color = Color.Gray, fontSize = 10.sp)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                DebugMetric("Weak: ", String.format("%+.2f", t.bonusWeak), if (t.bonusWeak < 0) Color.Red else Color.Gray)
-                DebugMetric("Fall: ", String.format("%+.2f", t.bonusFall), if (t.bonusFall > 0) Color.Green else Color.Gray)
-                DebugMetric("Impact: ", String.format("%+.2f", t.bonusImpact), if (t.bonusImpact > 0) Color.Green else Color.Gray)
+                DebugMetric("Impact: ", String.format("%.2f", t.currentImpact))
+                DebugMetric("Score: ", String.format("%.2f", t.crashScore))
+                DebugMetric("Spd: ", String.format("%.0f", t.gpsSpeed))
             }
         }
     }
 }
+
 
 @Composable
 fun DebugMetric(label: String, value: String, valueColor: Color = Color.Cyan) {
